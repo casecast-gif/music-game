@@ -9,6 +9,8 @@ const PLAYLIST_PAGE_SIZE = 50;
 const DEVICE_POLL_ATTEMPTS = 6;
 const PLAYBACK_POLL_ATTEMPTS = 8;
 const PLAYBACK_POLL_INTERVAL_MS = 300;
+const MAX_RATE_LIMIT_RETRIES = 3;
+const MAX_AUTOMATIC_RETRY_WAIT_MS = 30_000;
 
 function isMalformedJsonResponse(error) {
   return error?.status === 200 && error.message?.includes('invalid non-JSON response');
@@ -28,6 +30,7 @@ const TOKEN_KEY = 'musicGame.spotifyToken';
 const VERIFIER_KEY = 'musicGame.pkceVerifier';
 const STATE_KEY = 'musicGame.pkceState';
 const QUOTA_COOLDOWN_KEY = 'musicGame.spotifyQuotaCooldownUntil';
+const RATE_LIMIT_COOLDOWN_KEY = 'musicGame.spotifyRateLimitCooldownUntil';
 
 /** Converts one playlist item from `/playlists/{id}/items` into a flat track. */
 export function normalizePlaylistItem(entry) {
