@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cleanTitle,
+  formatYear,
   normalize,
   resolveOriginalYear,
   yearFromDate,
@@ -15,6 +16,12 @@ test('yearFromDate handles Spotify date precisions', () => {
   assert.equal(yearFromDate('1985'), 1985);
   assert.equal(yearFromDate('0000'), null);
   assert.equal(yearFromDate(null), null);
+});
+
+test('formatYear substitutes the requested clue labels', () => {
+  assert.equal(formatYear(1977), 'Star Wars');
+  assert.equal(formatYear(2001), 'Towers');
+  assert.equal(formatYear(1985), '1985');
 });
 
 test('cleanTitle strips remaster / version suffixes', () => {

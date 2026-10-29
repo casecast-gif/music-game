@@ -4,6 +4,7 @@ import {
   addContestant,
   createContestant,
   createGame,
+  DEFAULT_TARGET_SCORE,
   currentRound,
   deserializeGame,
   isTeam,
@@ -12,6 +13,7 @@ import {
   removeContestant,
   resetScores,
   roundPoints,
+  scoredCategories,
   serializeGame,
   setAward,
   shuffle,
@@ -79,6 +81,7 @@ test('scores count artist, title and year separately', () => {
   setAward(game, 0, alice.id, 'title');
   setAward(game, 0, alice.id, 'year');
   setAward(game, 0, team.id, 'year');
+  assert.deepEqual(scoredCategories(game.rounds[0], game.contestants), ['artist', 'title', 'year']);
   assert.equal(roundPoints(game.rounds[0], alice.id), 3);
   nextRound(game, ['x', 'y']);
   setAward(game, 1, team.id, 'artist', true);
@@ -114,7 +117,7 @@ test('ties share a rank', () => {
 });
 
 test('removing a contestant and resetting scores', () => {
-  const game = createGame();
+  const game = createGame({ targetScore: 12 });
   const a = createContestant('A');
   addContestant(game, a);
   nextRound(game, ['x']);
@@ -125,16 +128,20 @@ test('removing a contestant and resetting scores', () => {
   resetScores(game);
   assert.deepEqual(game.rounds, []);
   assert.deepEqual(game.deck, []);
+  assert.equal(game.targetScore, 12);
 });
 
 test('games survive serialization', () => {
-  const game = createGame({ playlistId: ID });
+  const game = createGame({ playlistId: ID, targetScore: 18 });
   const a = createContestant('A', ['x']);
   addContestant(game, a);
   nextRound(game, ['t1', 't2']);
   setAward(game, 0, a.id, 'artist');
   const restored = deserializeGame(serializeGame(game));
   assert.deepEqual(restored, game);
+  assert.equal(restored.targetScore, 18);
+  assert.equal(createGame().targetScore, DEFAULT_TARGET_SCORE);
+  assert.equal(deserializeGame('{"contestants":[],"rounds":[]}').targetScore, DEFAULT_TARGET_SCORE);
   assert.equal(deserializeGame('not json'), null);
   assert.equal(deserializeGame('{}'), null);
 });

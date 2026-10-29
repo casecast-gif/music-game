@@ -1,7 +1,8 @@
 // Pure game logic (no DOM / network) so it can be unit tested with `node --test`.
 
 export const CATEGORIES = ['artist', 'title', 'year'];
-export const CATEGORY_LABELS = { artist: 'Artist', title: 'Title', year: 'Year' };
+export const CATEGORY_LABELS = { artist: 'Artist', title: 'Song', year: 'Year' };
+export const DEFAULT_TARGET_SCORE = 15;
 
 const PLAYLIST_ID_RE = /^[A-Za-z0-9]{22}$/;
 
@@ -60,10 +61,11 @@ export function isTeam(contestant) {
   return contestant.members.length > 0;
 }
 
-export function createGame({ playlistId = null, contestants = [] } = {}) {
+export function createGame({ playlistId = null, contestants = [], targetScore = DEFAULT_TARGET_SCORE } = {}) {
   return {
     playlistId,
     contestants: contestants.slice(),
+    targetScore: Number.isSafeInteger(targetScore) && targetScore > 0 ? targetScore : DEFAULT_TARGET_SCORE,
     deck: [], // remaining track ids to play, in order
     rounds: [], // { trackId, awards: { [contestantId]: { artist, title, year } } }
   };
@@ -130,6 +132,10 @@ export function getAward(round, contestantId, category) {
   return Boolean(round?.awards[contestantId]?.[category]);
 }
 
+export function scoredCategories(round, contestants) {
+  return CATEGORIES.filter((category) => contestants.some((contestant) => getAward(round, contestant.id, category)));
+}
+
 export function roundPoints(round, contestantId) {
   return CATEGORIES.reduce((sum, cat) => sum + (getAward(round, contestantId, cat) ? 1 : 0), 0);
 }
@@ -179,6 +185,7 @@ export function deserializeGame(json) {
       contestants: data.contestants
         .filter((c) => c && typeof c.id === 'string' && typeof c.name === 'string')
         .map((c) => ({ id: c.id, name: c.name, members: Array.isArray(c.members) ? c.members.map(String) : [] })),
+      targetScore: Number.isSafeInteger(data.targetScore) && data.targetScore > 0 ? data.targetScore : DEFAULT_TARGET_SCORE,
       deck: Array.isArray(data.deck) ? data.deck.filter((id) => typeof id === 'string') : [],
       rounds: data.rounds
         .filter((r) => r && typeof r.trackId === 'string')

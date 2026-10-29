@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Host Spotify Player · Music Game</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="spotify-player-page">
+    <main>
+      <section class="panel spotify-player-panel">
+        <h1>Host Spotify Player</h1>
+        <p class="hint">Track details are visible in this window. Keep it off the shared game screen.</p>
+        <div id="spotify-embed"></div>
+        <p id="player-status" class="status" role="status" aria-live="polite">Loading Spotify player…</p>
+      </section>
+    </main>
+    <script type="module" src="js/spotify-player.js"></script>
+  </body>
+</html>

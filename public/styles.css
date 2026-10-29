@@ -36,6 +36,17 @@ code { background: #2a2a2a; padding: 0.1rem 0.35rem; border-radius: 4px; }
 .status.error { color: var(--danger); }
 .actions { margin-top: 1.25rem; }
 
+.connection-summary { display: flex; flex-wrap: wrap; gap: 1rem; color: var(--muted); }
+.connection-summary strong { color: var(--text); font-weight: 600; }
+.game-modes { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1rem; }
+.target-score-setting { display: grid; grid-template-columns: auto minmax(6rem, 8rem); align-items: center; gap: 0.4rem 0.75rem; margin-top: 1rem; }
+.target-score-setting label { flex: initial; color: var(--text); font-size: 1rem; }
+.target-score-setting .hint { grid-column: 1 / -1; }
+.settings { margin-top: 1.5rem; border-top: 1px solid var(--border); padding-top: 0.75rem; }
+.settings summary { width: fit-content; color: var(--muted); cursor: pointer; }
+.settings-content { padding-top: 0.5rem; }
+.settings-content > h3 { margin-top: 1rem; }
+
 .contestant-list { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .contestant-list li { background: #2a2a2a; border-radius: 999px; padding: 0.35rem 0.5rem 0.35rem 0.9rem; display: flex; align-items: center; gap: 0.5rem; }
 .contestant-list button { padding: 0.1rem 0.5rem; font-size: 0.85rem; }
@@ -47,14 +58,14 @@ code { background: #2a2a2a; padding: 0.1rem 0.35rem; border-radius: 4px; }
 .song-card { position: relative; display: flex; gap: 1.25rem; align-items: center; background: #262626; border-radius: 12px; padding: 1.25rem; min-height: 200px; }
 .song-card img { width: 160px; height: 160px; border-radius: 8px; object-fit: cover; background: #333; }
 .answers { display: grid; gap: 0.6rem; flex: 1; }
+.answer-row { display: grid; gap: 0.15rem; }
 .answers .label { display: block; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 .answer { font-size: 1.6rem; font-weight: 700; }
+.answer-hidden { color: var(--muted); }
 .year-answer { display: flex; align-items: baseline; gap: 0.75rem; }
 .year-answer small { font-size: 0.85rem; font-weight: normal; }
-.year-answer input { width: 6.5rem; font-size: 1.5rem; font-weight: 700; padding: 0.2rem 0.4rem; }
-.mystery { display: none; position: absolute; inset: 0; align-items: center; justify-content: center; font-size: 6rem; font-weight: 800; color: var(--accent); background: #262626; border-radius: 12px; }
-.song-card.hidden-answer .mystery { display: flex; }
-.controls button { flex: 1 1 auto; }
+.year-answer input { width: 11rem; font-size: 1.5rem; font-weight: 700; padding: 0.2rem 0.4rem; }
+.controls button { flex: 1 1 150px; }
 
 .score-table { width: 100%; border-collapse: collapse; }
 .score-table th, .score-table td { padding: 0.45rem 0.4rem; border-bottom: 1px solid var(--border); text-align: center; }
@@ -67,3 +78,8 @@ aside .score-table td:nth-child(2), aside .score-table th:nth-child(2) { text-al
 
 .history { padding-left: 1.5rem; max-height: 260px; overflow: auto; font-size: 0.9rem; }
 .history li { margin: 0.25rem 0; }
+
+.spotify-player-page { min-height: 100vh; }
+.spotify-player-page main { max-width: 520px; padding-top: 1rem; }
+.spotify-player-panel h1 { margin: 0 0 0.5rem; font-size: 1.25rem; }
+.spotify-player-panel #spotify-embed { min-height: 352px; }

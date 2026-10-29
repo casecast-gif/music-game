@@ -3,42 +3,37 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Music Game Host</title>
+    <title>Music Game</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header>
-      <h1>🎵 Music Game Host</h1>
+      <h1>🎵 Music Game</h1>
       <div id="status" class="status" role="status" aria-live="polite"></div>
     </header>
 
     <main>
       <section id="setup" class="panel">
-        <h2>1. Connect Spotify</h2>
-        <form id="spotify-form" class="row">
-          <label>
-            Spotify Client ID
-            <input id="client-id" autocomplete="off" spellcheck="false" placeholder="from developer.spotify.com/dashboard" />
-          </label>
-          <button id="login" type="submit">Log in with Spotify</button>
-          <button id="logout" type="button" class="secondary" hidden>Log out</button>
-        </form>
-        <p class="hint">
-          Redirect URI to register in your Spotify app: <code id="redirect-uri"></code>
-        </p>
+        <div class="game-modes" role="group" aria-label="Game mode">
+          <button id="mode-no-steve" type="button" class="primary" aria-pressed="true">No Steve</button>
+          <button id="mode-im-steve" type="button" disabled title="Coming soon">I'm Steve</button>
+          <button type="button" disabled title="Coming soon">Jeopardy Styleez</button>
+          <button type="button" disabled title="Coming soon">Name That Tune</button>
+        </div>
 
-        <h2>2. Playlist</h2>
-        <form id="playlist-form" class="row">
-          <label>
-            Playlist link or ID
-            <input id="playlist" autocomplete="off" spellcheck="false" />
-          </label>
-          <button type="submit">Load playlist</button>
-        </form>
-        <p id="playlist-info" class="hint"></p>
+        <div class="connection-summary" aria-live="polite">
+          <span>Spotify <strong id="spotify-state">Not connected</strong></span>
+          <span>Playlist <strong id="playlist-state">Not loaded</strong></span>
+        </div>
 
-        <h2>3. Players &amp; teams</h2>
+        <div class="target-score-setting">
+          <label for="target-score">Play to (total points)</label>
+          <input id="target-score" type="number" min="1" step="1" value="15" />
+          <span class="hint">Points combine correct Artist, Song, and Year guesses. Play can continue past the target.</span>
+        </div>
+
+        <h2>Players &amp; teams</h2>
         <form id="contestant-form" class="row">
           <label>
             Player or team name
@@ -56,37 +51,72 @@
           <button id="start" type="button" class="primary" disabled>Start game</button>
           <button id="resume" type="button" hidden>Resume game</button>
         </div>
+
+        <details id="setup-settings" class="settings">
+          <summary>⚙ Settings &amp; troubleshooting</summary>
+          <div class="settings-content">
+            <h3>Spotify connection</h3>
+            <form id="spotify-form" class="row">
+              <label>
+                Spotify Client ID
+                <input id="client-id" autocomplete="off" spellcheck="false" placeholder="from developer.spotify.com/dashboard" />
+              </label>
+              <button id="login" type="submit">Log in with Spotify</button>
+              <button id="logout" type="button" class="secondary" hidden>Log out</button>
+            </form>
+            <p class="hint">
+              Redirect URI to register in your Spotify app: <code id="redirect-uri"></code>
+            </p>
+
+            <h3>Playback</h3>
+            <p class="hint">Prepare this browser as the speaker if you want audio to play in this tab.</p>
+            <button id="enable-browser-player" type="button" class="secondary">Enable playback in this browser</button>
+
+            <h3>Playlist</h3>
+            <form id="playlist-form" class="row">
+              <label>
+                Playlist link or ID
+                <input id="playlist" autocomplete="off" spellcheck="false" />
+              </label>
+              <button type="submit">Load playlist</button>
+            </form>
+            <p id="playlist-info" class="hint"></p>
+          </div>
+        </details>
       </section>
 
       <section id="game" class="panel" hidden>
         <div class="game-grid">
           <div>
             <div class="round-header">
-              <h2 id="round-title">Song 1</h2>
+              <h2 id="round-title">Biggest hits of all time</h2>
               <span id="deck-info" class="muted"></span>
             </div>
 
-            <div id="song-card" class="song-card hidden-answer">
-              <img id="cover" alt="" />
+            <div id="song-card" class="song-card">
+              <img id="cover" alt="Album art" hidden />
               <div class="answers">
-                <div><span class="label">Artist</span><span id="answer-artist" class="answer"></span></div>
-                <div><span class="label">Title</span><span id="answer-title" class="answer"></span></div>
+                <div class="answer-row"><span class="label">Artist</span><span id="answer-artist" class="answer answer-hidden">?</span></div>
+                <div class="answer-row"><span class="label">Song</span><span id="answer-title" class="answer answer-hidden">?</span></div>
                 <div>
                   <span class="label">Year</span>
                   <span class="answer year-answer">
-                    <input id="answer-year" type="number" min="1800" max="2100" aria-label="Original release year" />
+                    <input id="answer-year" type="text" inputmode="numeric" autocomplete="off" aria-label="Original release year" hidden />
+                    <span id="answer-year-placeholder" class="answer answer-hidden">?</span>
                     <small id="year-source" class="muted"></small>
                   </span>
                 </div>
-                <div class="muted small" id="answer-album"></div>
+                <div class="muted small" id="answer-album" hidden></div>
               </div>
-              <div class="mystery" aria-hidden="true">?</div>
             </div>
 
             <div class="row controls">
-              <button id="play-pause" type="button">⏯ Play / Pause</button>
+              <button id="play-pause" type="button">⏯ Play / Pause game song</button>
               <button id="replay" type="button" class="secondary">⏮ Restart song</button>
-              <button id="reveal" type="button" class="primary">👀 Reveal answer</button>
+              <button id="reveal-artist" type="button">Reveal artist</button>
+              <button id="reveal-title" type="button">Reveal title</button>
+              <button id="reveal-year" type="button">Reveal year</button>
+              <button id="wrong-reveal" type="button" class="danger">Wrong — reveal all</button>
               <button id="next" type="button" class="primary">⏭ Next song</button>
             </div>
             <div class="row">
@@ -94,23 +124,25 @@
                 Play on
                 <select id="device"></select>
               </label>
-              <button id="refresh-devices" type="button" class="secondary small">↻</button>
+              <button id="refresh-devices" type="button" class="secondary small">↻ Refresh devices</button>
+              <button id="open-spotify-player" type="button" class="secondary small" disabled title="Reserved for Name That Tune mode">Spotify preview (Name That Tune, later)</button>
             </div>
+            <p class="hint">Full-song playback uses a Spotify device or the browser player. The Spotify preview player is reserved for Name That Tune mode.</p>
 
             <h3>Score this song</h3>
             <table class="score-table">
               <thead>
-                <tr><th>Player / team</th><th>Artist</th><th>Title</th><th>Year</th><th>Pts</th></tr>
+                <tr><th>Player / team</th><th>Artist</th><th>Song</th><th>Year</th><th>Pts</th></tr>
               </thead>
               <tbody id="round-scoring"></tbody>
             </table>
           </div>
 
           <aside>
-            <h3>Scoreboard</h3>
+            <h3>Scoreboard <span id="score-goal" class="muted small"></span></h3>
             <table class="score-table">
               <thead>
-                <tr><th>#</th><th>Player / team</th><th title="Artist">A</th><th title="Title">T</th><th title="Year">Y</th><th>Total</th></tr>
+                <tr><th>#</th><th>Player / team</th><th title="Artist">A</th><th title="Song">S</th><th title="Year">Y</th><th>Total / Goal</th></tr>
               </thead>
               <tbody id="scoreboard"></tbody>
             </table>

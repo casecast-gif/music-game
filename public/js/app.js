@@ -1,7 +1,8 @@
-import { DEFAULT_PLAYLIST_URL } from './config.js';
+import { DEFAULT_PLAYLIST_URL, DEFAULT_SPOTIFY_CLIENT_ID } from './config.js';
 import {
   CATEGORIES,
   CATEGORY_LABELS,
+  DEFAULT_TARGET_SCORE,
   addContestant,
   createContestant,
   createGame,
@@ -13,23 +14,35 @@ import {
   removeContestant,
   resetScores,
   roundPoints,
+  scoredCategories,
   serializeGame,
   setAward,
   getAward,
   standings,
 } from './game.js';
 import { SpotifyClient, handleRedirect, isLoggedIn, logout, redirectUri, startLogin } from './spotify.js';
-import { cleanTitle, resolveOriginalYear } from './year.js';
+import { cleanTitle, formatYear, resolveOriginalYear, yearFromDate } from './year.js';
 
 const KEYS = {
   clientId: 'musicGame.clientId',
   playlist: 'musicGame.playlist',
+  playlistCache: 'musicGame.playlistCache',
+  targetScore: 'musicGame.targetScore',
   game: 'musicGame.game',
   years: 'musicGame.years',
   yearOverrides: 'musicGame.yearOverrides',
+  deviceId: 'musicGame.deviceId',
 };
 
+const BROWSER_DEVICE = '__browser__';
+const EMBEDDED_DEVICE = '__spotify_embed__';
+const EMBEDDED_CHANNEL = 'music-game-spotify-player';
 const $ = (id) => document.getElementById(id);
+let embeddedPlayerWindow = null;
+let embeddedPlayerReady = false;
+let embeddedPlayerUri = null;
+let embeddedPendingTrack = null;
+let embeddedIsPaused = null;
 
 function loadJson(key, fallback) {
   try {
@@ -39,19 +52,27 @@ function loadJson(key, fallback) {
   }
 }
 
+function loadTargetScore() {
+  const score = Number(localStorage.getItem(KEYS.targetScore));
+  return Number.isSafeInteger(score) && score > 0 ? score : DEFAULT_TARGET_SCORE;
+}
+
 const state = {
-  clientId: localStorage.getItem(KEYS.clientId) ?? '',
+  clientId: localStorage.getItem(KEYS.clientId) ?? DEFAULT_SPOTIFY_CLIENT_ID,
   playlistInput: localStorage.getItem(KEYS.playlist) ?? DEFAULT_PLAYLIST_URL,
   playlistName: null,
   tracks: new Map(),
   game: deserializeGame(localStorage.getItem(KEYS.game)) ?? createGame(),
-  revealed: false,
+  targetScore: loadTargetScore(),
+  revealedAnswers: { artist: false, title: false, year: false },
   years: loadJson(KEYS.years, {}),
   yearOverrides: loadJson(KEYS.yearOverrides, {}),
   fallbackYears: {},
   pendingYears: new Set(),
   spotify: null,
   playerPromise: null,
+  selectedDeviceId: localStorage.getItem(KEYS.deviceId) ?? '',
+  loadingPlaylist: false,
 };
 
 function saveGame() {
@@ -83,6 +104,13 @@ function renderSetup() {
   $('login').textContent = loggedIn ? 'Connected ✓ (log in again)' : 'Log in with Spotify';
   $('logout').hidden = !loggedIn;
   $('playlist').value = state.playlistInput;
+  $('target-score').value = String(state.targetScore);
+  $('spotify-state').textContent = loggedIn ? 'Connected' : 'Not connected';
+  $('playlist-state').textContent = state.loadingPlaylist
+    ? 'Loading…'
+    : state.tracks.size
+      ? `Ready · ${state.tracks.size.toLocaleString()} songs`
+      : 'Not loaded';
 
   const info = $('playlist-info');
   if (state.tracks.size) {
@@ -113,7 +141,7 @@ function renderSetup() {
     }),
   );
 
-  const ready = loggedIn && state.tracks.size > 0 && state.game.contestants.length > 0;
+  const ready = loggedIn && !state.loadingPlaylist && state.tracks.size > 0 && state.game.contestants.length > 0;
   $('start').disabled = !ready;
   const resumable = ready && state.game.rounds.length > 0 && state.game.playlistId === parsePlaylistId(state.playlistInput);
   $('resume').hidden = !resumable;
@@ -123,73 +151,205 @@ function renderSetup() {
 async function loadPlaylist() {
   const playlistId = parsePlaylistId(state.playlistInput);
   if (!playlistId) throw new Error('That does not look like a Spotify playlist link');
+  state.loadingPlaylist = true;
+  renderSetup();
   setStatus('Loading playlist…');
   const client = spotify();
   let name;
   let tracks;
   try {
-    [name, tracks] = await Promise.all([client.getPlaylistName(playlistId), client.getPlaylistTracks(playlistId)]);
+    [name, tracks] = await Promise.all([
+      client.getPlaylistName(playlistId),
+      client.getPlaylistTracks(playlistId, {
+        onProgress: (loaded, total) => {
+          setStatus(`Loading playlist… ${loaded.toLocaleString()} / ${total.toLocaleString()}`);
+          $('playlist-state').textContent = `Loading… ${loaded.toLocaleString()} / ${total.toLocaleString()}`;
+        },
+      }),
+    ]);
   } catch (err) {
     if (err.status === 403) {
       throw new Error('Spotify blocked this playlist (403). Log in as the playlist owner/collaborator or use a copy saved to your account.');
     }
     throw err;
+  } finally {
+    state.loadingPlaylist = false;
+    renderSetup();
   }
   if (!tracks.length) throw new Error('No playable songs found in that playlist');
   state.playlistName = name;
   state.tracks = new Map(tracks.map((t) => [t.id, t]));
-  setStatus(`Playlist ready: ${tracks.length} songs`);
+  let cached = true;
+  try {
+    localStorage.setItem(KEYS.playlistCache, JSON.stringify({
+      playlistId,
+      name,
+      tracks: [...state.tracks.values()],
+    }));
+    $('setup-settings').open = false;
+  } catch (err) {
+    cached = false;
+    console.warn('Could not cache the loaded playlist', err);
+  }
+  setStatus(cached
+    ? `Playlist ready: ${state.tracks.size.toLocaleString()} songs`
+    : 'Playlist loaded, but could not be cached; it will need reloading next time.');
   renderSetup();
 }
 
 // ---------- Playback ----------
 
-async function ensurePlayer() {
-  if (!state.playerPromise) {
-    state.playerPromise = spotify()
-      .initPlayer('Music Game Host')
-      .catch((err) => {
-        setStatus(`Browser player unavailable (${err.message}). Pick another Spotify device below.`, true);
-        return null;
-      });
+function embeddedPlayerIsOpen() {
+  if (embeddedPlayerWindow && embeddedPlayerWindow.closed) {
+    embeddedPlayerWindow = null;
+    embeddedPlayerReady = false;
+    embeddedPlayerUri = null;
+    embeddedPendingTrack = null;
+    embeddedIsPaused = null;
   }
-  await state.playerPromise;
-  await refreshDevices();
+  return Boolean(embeddedPlayerWindow);
+}
+
+function postEmbeddedMessage(type, data = {}) {
+  if (!embeddedPlayerIsOpen() || !embeddedPlayerReady) return false;
+  embeddedPlayerWindow.postMessage({ channel: EMBEDDED_CHANNEL, type, ...data }, location.origin);
+  return true;
+}
+
+function flushEmbeddedTrack() {
+  if (!embeddedPlayerReady || !embeddedPendingTrack) return;
+  const { uri, play } = embeddedPendingTrack;
+  embeddedPendingTrack = null;
+  if (uri !== embeddedPlayerUri) {
+    embeddedPlayerUri = uri;
+    postEmbeddedMessage('load', { uri, play });
+  } else if (play) {
+    postEmbeddedMessage('play');
+  }
+}
+
+function requestEmbeddedTrack(uri, play = false) {
+  if (!embeddedPlayerIsOpen()) {
+    throw new Error('Open the host Spotify player window before using it for playback.');
+  }
+  embeddedPendingTrack = { uri, play };
+  flushEmbeddedTrack();
+}
+
+function openEmbeddedPlayer(uri, { play = false } = {}) {
+  const current = currentRound(state.game);
+  const track = current && state.tracks.get(current.trackId);
+  const initialUri = uri ?? track?.uri ?? state.tracks.values().next().value?.uri;
+  if (!initialUri) throw new Error('Load a playlist and start a game before opening the Spotify player.');
+
+  if (embeddedPlayerIsOpen()) {
+    embeddedPlayerWindow.focus();
+    requestEmbeddedTrack(initialUri, play);
+  } else {
+    const url = new URL('./spotify-player.html', location.href);
+    url.searchParams.set('uri', initialUri);
+    const popup = window.open(url.toString(), 'music-game-spotify-player', 'popup,width=460,height=560,resizable=yes');
+    if (!popup) throw new Error('The Spotify player window was blocked. Allow popups for this site and try again.');
+    embeddedPlayerWindow = popup;
+    embeddedPlayerReady = false;
+    embeddedPlayerUri = initialUri;
+    embeddedPendingTrack = { uri: initialUri, play };
+    embeddedIsPaused = null;
+  }
+
+  state.selectedDeviceId = EMBEDDED_DEVICE;
+  localStorage.setItem(KEYS.deviceId, EMBEDDED_DEVICE);
+  $('device').value = EMBEDDED_DEVICE;
+  setStatus('Spotify host player opened. Track details are shown only in that window.');
+}
+
+async function ensurePlayer() {
+  if (spotify().deviceId) return spotify().deviceId;
+  if (!state.playerPromise) {
+    state.playerPromise = spotify().initPlayer('Music Game', undefined, (err) => setStatus(err.message, true)).catch((err) => {
+      state.playerPromise = null;
+      throw err;
+    });
+  }
+  return state.playerPromise;
 }
 
 async function refreshDevices() {
   const select = $('device');
-  const previous = select.value;
-  let devices = [];
-  try {
-    devices = await spotify().getDevices();
-  } catch (err) {
-    console.warn(err);
-  }
-  const options = [];
+  const previous = select.value || state.selectedDeviceId;
+  const devices = await spotify().getDevices();
+  const options = [new Option('Choose a Spotify device…', '')];
   const ownId = spotify().deviceId;
-  if (ownId) options.push(new Option('This browser', ownId));
   for (const d of devices) {
-    if (d.id && d.id !== ownId && !d.is_restricted) options.push(new Option(`${d.name} (${d.type})`, d.id));
+    if (d.id && d.id !== ownId && !d.is_restricted) {
+      const activeLabel = d.is_active ? ', active' : '';
+      options.push(new Option(`${d.name} (${d.type}${activeLabel})`, d.id));
+    }
   }
-  if (!options.length) options.push(new Option('No devices — open Spotify somewhere', ''));
+  if (ownId) options.push(new Option('This browser', ownId));
+  else options.push(new Option('This browser (enable playback)', BROWSER_DEVICE));
   select.replaceChildren(...options);
-  if (options.some((o) => o.value === previous)) select.value = previous;
+  const previousOption = previous === BROWSER_DEVICE && ownId ? ownId : previous;
+  const previousDevice = devices.find((device) => device.id === previousOption);
+  const previousIsBrowser = Boolean(ownId && previousOption === ownId) || (previous === BROWSER_DEVICE && !ownId);
+  const preferred = previousIsBrowser || previousDevice?.is_active
+    ? options.find((option) => option.value === previousOption)
+    : options.find((option) => devices.find((device) => device.id === option.value)?.is_active)
+      ?? options.find((option) => option.value === ownId && ownId)
+      ?? options.find((option) => option.value && option.value !== BROWSER_DEVICE);
+  if (preferred) select.value = preferred.value;
+  state.selectedDeviceId = select.value === ownId && ownId ? BROWSER_DEVICE : select.value;
+  if (state.selectedDeviceId) localStorage.setItem(KEYS.deviceId, state.selectedDeviceId);
+  else localStorage.removeItem(KEYS.deviceId);
+  if (!devices.length && !ownId) {
+    setStatus('No Spotify devices found. Open Spotify on the intended device, or enable this browser as a player.');
+  }
+  return devices;
 }
 
 async function playCurrent() {
   const round = currentRound(state.game);
   const track = round && state.tracks.get(round.trackId);
   if (!track) return;
-  const deviceId = $('device').value || spotify().deviceId;
-  if (!deviceId) throw new Error('No playback device. Open Spotify on a device and press ↻.');
+  let deviceId = $('device').value;
+  if (deviceId === EMBEDDED_DEVICE) {
+    requestEmbeddedTrack(track.uri, true);
+    setStatus('Game song sent to the Spotify player window. Use its Play control if playback does not start.');
+    return;
+  }
+  if (deviceId === BROWSER_DEVICE) {
+    try {
+      if (!spotify().deviceId) {
+        deviceId = await ensurePlayer();
+        await refreshDevices();
+        $('device').value = deviceId;
+        state.selectedDeviceId = BROWSER_DEVICE;
+        localStorage.setItem(KEYS.deviceId, BROWSER_DEVICE);
+        setStatus('This browser is prepared. Click Play again to start the song.');
+        return;
+      }
+      deviceId = spotify().deviceId;
+    } catch (browserError) {
+      const devices = await refreshDevices();
+      const connectDevices = devices.filter((device) => device.id && device.id !== spotify().deviceId && !device.is_restricted);
+      const fallback = connectDevices.find((device) => device.is_active) ?? connectDevices[0];
+      if (!fallback) throw browserError;
+      deviceId = fallback.id;
+      $('device').value = deviceId;
+      state.selectedDeviceId = deviceId;
+      localStorage.setItem(KEYS.deviceId, deviceId);
+      setStatus(`Browser playback unavailable. Falling back to ${fallback.name}.`);
+    }
+  }
+  if (!deviceId) throw new Error('Choose a Spotify device, or open Spotify on the intended device and refresh the device list.');
   spotify().activate();
   try {
+    setStatus('Starting playback…');
     await spotify().play(track.uri, deviceId);
     setStatus('Playing… 🎶');
   } catch (err) {
-    if (err.status === 404) throw new Error('Spotify device not found. Press ↻ and pick a device.');
-    if (err.status === 403) throw new Error('Spotify refused playback (Premium account required).');
+    if (err.status === 404) throw new Error(`Spotify device not found: ${err.message}. Press ↻ and pick an active device.`);
+    if (err.status === 403) throw new Error(`Spotify refused playback: ${err.message}. Premium is required for playback control.`);
     throw err;
   }
 }
@@ -198,12 +358,15 @@ async function playCurrent() {
 
 function yearFor(trackId) {
   if (state.yearOverrides[trackId] != null) return { year: state.yearOverrides[trackId], source: 'manual' };
-  return state.years[trackId] ?? state.fallbackYears[trackId] ?? null;
+  const cached = state.years[trackId] ?? state.fallbackYears[trackId];
+  if (cached) return cached;
+  const spotifyYear = yearFromDate(state.tracks.get(trackId)?.releaseDate);
+  return spotifyYear ? { year: spotifyYear, source: 'spotify' } : null;
 }
 
 function prefetchYear(trackId) {
   const track = state.tracks.get(trackId);
-  if (!track || yearFor(trackId) || state.pendingYears.has(trackId)) return;
+  if (!track || state.yearOverrides[trackId] != null || state.years[trackId] || state.pendingYears.has(trackId)) return;
   state.pendingYears.add(trackId);
   resolveOriginalYear(track)
     .then(({ year, source, complete }) => {
@@ -232,24 +395,52 @@ function trackLabel(track) {
   return track ? `${track.artists.join(', ')} — ${displayTitle(track)}` : 'Unknown song';
 }
 
+function answersComplete() {
+  return Object.values(state.revealedAnswers).every(Boolean);
+}
+
+function revealAllAnswers() {
+  state.revealedAnswers = { artist: true, title: true, year: true };
+}
+
 function renderAnswer() {
   const round = currentRound(state.game);
   const track = round && state.tracks.get(round.trackId);
-  $('song-card').classList.toggle('hidden-answer', !state.revealed);
-  $('reveal').textContent = state.revealed ? '🙈 Hide answer' : '👀 Reveal answer';
-  $('cover').src = (state.revealed && track?.image) || '';
-  $('cover').hidden = !(state.revealed && track?.image);
-  $('answer-artist').textContent = state.revealed && track ? track.artists.join(', ') : '';
-  $('answer-title').textContent = state.revealed && track ? displayTitle(track) : '';
-  $('answer-album').textContent = state.revealed && track ? `Spotify: “${track.title}” on ${track.album}` : '';
+  for (const category of scoredCategories(round, state.game.contestants)) state.revealedAnswers[category] = true;
+  const allAnswersComplete = answersComplete();
+  const revealControls = {
+    artist: $('reveal-artist'),
+    title: $('reveal-title'),
+    year: $('reveal-year'),
+  };
+  for (const [category, button] of Object.entries(revealControls)) {
+    button.disabled = state.revealedAnswers[category];
+    button.textContent = state.revealedAnswers[category]
+      ? `${CATEGORY_LABELS[category]} revealed ✓`
+      : `Reveal ${CATEGORY_LABELS[category].toLowerCase()}`;
+  }
+  $('wrong-reveal').disabled = allAnswersComplete;
+  $('cover').src = (allAnswersComplete && track?.image) || '';
+  $('cover').hidden = !(allAnswersComplete && track?.image);
+  $('answer-artist').textContent = state.revealedAnswers.artist && track ? track.artists.join(', ') : '?';
+  $('answer-artist').classList.toggle('answer-hidden', !state.revealedAnswers.artist);
+  $('answer-title').textContent = state.revealedAnswers.title && track ? displayTitle(track) : '?';
+  $('answer-title').classList.toggle('answer-hidden', !state.revealedAnswers.title);
+  $('answer-album').textContent = allAnswersComplete && track ? `Spotify: “${track.title}” on ${track.album}` : '';
+  $('answer-album').hidden = !allAnswersComplete;
   const yearInput = $('answer-year');
   const info = track ? yearFor(track.id) : null;
-  if (document.activeElement !== yearInput) yearInput.value = state.revealed && info?.year ? info.year : '';
+  yearInput.hidden = !state.revealedAnswers.year;
+  $('answer-year-placeholder').hidden = state.revealedAnswers.year;
+  if (document.activeElement !== yearInput) yearInput.value = state.revealedAnswers.year && info?.year ? formatYear(info.year) : '?';
+  yearInput.classList.toggle('answer-hidden', !state.revealedAnswers.year);
   const sources = { musicbrainz: 'original release (MusicBrainz)', spotify: 'from Spotify album', manual: 'set by host' };
-  $('year-source').textContent = !state.revealed
+  $('year-source').textContent = !state.revealedAnswers.year
     ? ''
     : info
-      ? sources[info.source] ?? ''
+      ? state.pendingYears.has(track.id) && info.source === 'spotify'
+        ? 'Spotify album year; checking original release…'
+        : sources[info.source] ?? ''
       : track && state.pendingYears.has(track.id)
         ? 'looking up original year…'
         : '';
@@ -282,8 +473,11 @@ function renderRoundScoring() {
         btn.textContent = on ? '✓' : '—';
         btn.disabled = !round;
         btn.addEventListener('click', () => {
-          setAward(state.game, roundIndex, c.id, cat);
+          const scored = setAward(state.game, roundIndex, c.id, cat);
+          if (scored) state.revealedAnswers[cat] = true;
           saveGame();
+          renderAnswer();
+          renderHistory();
           renderScores();
         });
         td.append(btn);
@@ -299,6 +493,7 @@ function renderRoundScoring() {
 
 function renderScoreboard() {
   const rows = standings(state.game);
+  $('score-goal').textContent = `Playing to ${state.game.targetScore} points`;
   $('scoreboard').replaceChildren(
     ...rows.map((row) => {
       const tr = document.createElement('tr');
@@ -311,7 +506,7 @@ function renderScoreboard() {
         members.textContent = row.contestant.members.join(', ');
         name.append(members);
       }
-      const cells = [row.rank, null, row.byCategory.artist, row.byCategory.title, row.byCategory.year, `${row.total}/${row.maxPoints}`];
+      const cells = [row.rank, null, row.byCategory.artist, row.byCategory.title, row.byCategory.year, `${row.total}/${state.game.targetScore}`];
       cells.forEach((value, i) => {
         if (i === 1) return tr.append(name);
         const td = document.createElement('td');
@@ -325,14 +520,14 @@ function renderScoreboard() {
 
 function renderHistory() {
   const rounds = state.game.rounds;
-  const visible = state.revealed ? rounds : rounds.slice(0, -1);
+  const visible = answersComplete() ? rounds : rounds.slice(0, -1);
   $('history').replaceChildren(
     ...visible
       .map((round) => {
         const li = document.createElement('li');
         const track = state.tracks.get(round.trackId);
         const year = yearFor(round.trackId)?.year;
-        li.textContent = `${trackLabel(track)}${year ? ` (${year})` : ''}`;
+        li.textContent = `${trackLabel(track)}${year ? ` (${formatYear(year)})` : ''}`;
         return li;
       })
       .reverse(),
@@ -345,8 +540,7 @@ function renderScores() {
 }
 
 function renderGame() {
-  const played = state.game.rounds.length;
-  $('round-title').textContent = played ? `Song ${played}` : 'Ready';
+  $('round-title').textContent = 'Biggest hits of all time';
   $('deck-info').textContent = `${state.game.deck.length} of ${state.tracks.size} songs left in the shuffle`;
   renderAnswer();
   renderScores();
@@ -359,10 +553,11 @@ function showScreen(name) {
 }
 
 async function nextSong() {
+  spotify().activate();
   const trackIds = [...state.tracks.keys()];
   const trackId = nextRound(state.game, trackIds);
   if (!trackId) throw new Error('The playlist is empty');
-  state.revealed = false;
+  state.revealedAnswers = { artist: false, title: false, year: false };
   saveGame();
   renderGame();
   prefetchYear(trackId);
@@ -373,21 +568,29 @@ async function nextSong() {
 async function enterGame({ fresh }) {
   const playlistId = parsePlaylistId(state.playlistInput);
   if (fresh) {
+    const targetScore = Number($('target-score').value);
+    if (!Number.isSafeInteger(targetScore) || targetScore < 1) throw new Error('The target score must be a positive whole number.');
+    state.targetScore = targetScore;
+    localStorage.setItem(KEYS.targetScore, String(targetScore));
     if (state.game.rounds.length && !confirm('Start a new game? Current scores will be cleared.')) return;
     resetScores(state.game);
+    state.game.targetScore = state.targetScore;
+  } else {
+    state.targetScore = state.game.targetScore;
+    localStorage.setItem(KEYS.targetScore, String(state.targetScore));
   }
   state.game.playlistId = playlistId;
   saveGame();
   showScreen('game');
   spotify().activate();
-  setStatus('Starting Spotify player…');
-  await ensurePlayer();
+  setStatus('Checking Spotify devices…');
+  await refreshDevices();
   // When resuming, drop songs no longer in the playlist from the remaining deck.
   state.game.deck = state.game.deck.filter((id) => state.tracks.has(id));
   if (fresh || !currentRound(state.game) || !state.tracks.has(currentRound(state.game).trackId)) {
     await nextSong();
   } else {
-    state.revealed = false;
+    state.revealedAnswers = { artist: false, title: false, year: false };
     renderGame();
     prefetchYear(currentRound(state.game).trackId);
     setStatus('Game resumed — press Play to continue the current song.');
@@ -401,6 +604,28 @@ function on(id, event, handler) {
     Promise.resolve(handler(e)).catch(reportError);
   });
 }
+
+window.addEventListener('message', (event) => {
+  if (
+    !embeddedPlayerWindow ||
+    event.source !== embeddedPlayerWindow ||
+    event.origin !== location.origin ||
+    event.data?.channel !== EMBEDDED_CHANNEL
+  ) return;
+
+  if (event.data.type === 'ready') {
+    embeddedPlayerReady = true;
+    if (typeof event.data.uri === 'string') embeddedPlayerUri = event.data.uri;
+    flushEmbeddedTrack();
+    return;
+  }
+  if (event.data.type === 'playback') {
+    embeddedIsPaused = Boolean(event.data.isPaused);
+    setStatus(embeddedIsPaused ? 'Spotify player is paused.' : 'Playing in Spotify player.');
+    return;
+  }
+  if (event.data.type === 'error') setStatus(`Spotify player error: ${event.data.message}`, true);
+});
 
 on('spotify-form', 'submit', async (e) => {
   e.preventDefault();
@@ -438,32 +663,127 @@ on('contestant-form', 'submit', (e) => {
   renderSetup();
 });
 
+on('target-score', 'change', () => {
+  const targetScore = Number($('target-score').value);
+  if (!Number.isSafeInteger(targetScore) || targetScore < 1) {
+    $('target-score').value = String(state.targetScore);
+    throw new Error('The target score must be a positive whole number.');
+  }
+  state.targetScore = targetScore;
+  localStorage.setItem(KEYS.targetScore, String(targetScore));
+  setStatus(`Target score saved: ${targetScore} points`);
+});
+
 on('start', 'click', () => enterGame({ fresh: true }));
 on('resume', 'click', () => enterGame({ fresh: false }));
+on('open-spotify-player', 'click', () => openEmbeddedPlayer());
+on('enable-browser-player', 'click', async () => {
+  if (spotify().deviceId) {
+    spotify().activate();
+    setStatus('Browser audio activated. Select this browser and press Play.');
+    return;
+  }
+  setStatus('Starting Spotify playback in this browser…');
+  const deviceId = await ensurePlayer();
+  state.selectedDeviceId = BROWSER_DEVICE;
+  localStorage.setItem(KEYS.deviceId, BROWSER_DEVICE);
+  await refreshDevices();
+  $('device').value = deviceId;
+  state.selectedDeviceId = BROWSER_DEVICE;
+  localStorage.setItem(KEYS.deviceId, BROWSER_DEVICE);
+  setStatus('This browser is prepared. Select it and press Play to start a song.');
+});
 on('play-pause', 'click', async () => {
   spotify().activate();
-  const deviceId = $('device').value || spotify().deviceId;
-  if (!(await spotify().togglePlay(deviceId))) await playCurrent();
+  const deviceId = $('device').value;
+  const round = currentRound(state.game);
+  const track = round && state.tracks.get(round.trackId);
+  if (!track) return;
+  if (deviceId === EMBEDDED_DEVICE) {
+    if (!embeddedPlayerIsOpen()) return openEmbeddedPlayer(track.uri, { play: true });
+    if (!embeddedPlayerReady || embeddedPlayerUri !== track.uri) {
+      requestEmbeddedTrack(track.uri, true);
+      setStatus('Preparing the game song in the Spotify player window…');
+      return;
+    }
+    const action = embeddedIsPaused === false ? 'pause' : 'play';
+    postEmbeddedMessage(action);
+    setStatus(action === 'play' ? 'Starting playback in the Spotify player window…' : 'Pausing the Spotify player…');
+    return;
+  }
+  if (!deviceId || deviceId === BROWSER_DEVICE) return playCurrent();
+  if (!(await spotify().togglePlay(deviceId, track.uri))) await playCurrent();
 });
-on('replay', 'click', () => playCurrent());
-on('reveal', 'click', () => {
-  state.revealed = !state.revealed;
+on('replay', 'click', () => {
+  spotify().activate();
+  const deviceId = $('device').value;
+  if (deviceId !== EMBEDDED_DEVICE) return playCurrent();
+  const track = state.tracks.get(currentRound(state.game)?.trackId);
+  if (!track) return;
+  if (!embeddedPlayerIsOpen()) return openEmbeddedPlayer(track.uri, { play: true });
+  if (!embeddedPlayerReady || embeddedPlayerUri !== track.uri) {
+    requestEmbeddedTrack(track.uri, true);
+    return;
+  }
+  postEmbeddedMessage('restart');
+});
+for (const category of CATEGORIES) {
+  on(`reveal-${category}`, 'click', () => {
+    state.revealedAnswers[category] = true;
+    renderAnswer();
+    renderHistory();
+  });
+}
+on('wrong-reveal', 'click', () => {
+  revealAllAnswers();
   renderAnswer();
   renderHistory();
 });
 on('next', 'click', () => nextSong());
 on('refresh-devices', 'click', () => refreshDevices());
+on('device', 'change', async () => {
+  const selectedDevice = $('device').value;
+  if (state.selectedDeviceId === EMBEDDED_DEVICE && selectedDevice !== EMBEDDED_DEVICE && embeddedIsPaused === false) {
+    postEmbeddedMessage('pause');
+  }
+  state.selectedDeviceId = selectedDevice === spotify().deviceId && selectedDevice
+    ? BROWSER_DEVICE
+    : selectedDevice;
+  if (state.selectedDeviceId) localStorage.setItem(KEYS.deviceId, state.selectedDeviceId);
+  if (selectedDevice === EMBEDDED_DEVICE) {
+    const track = state.tracks.get(currentRound(state.game)?.trackId);
+    openEmbeddedPlayer(track?.uri);
+    return;
+  }
+  if (selectedDevice === BROWSER_DEVICE) {
+    setStatus('Starting Spotify browser player…');
+    spotify().activate();
+    const deviceId = await ensurePlayer();
+    await refreshDevices();
+    $('device').value = deviceId;
+    state.selectedDeviceId = BROWSER_DEVICE;
+    localStorage.setItem(KEYS.deviceId, BROWSER_DEVICE);
+    setStatus('This browser is prepared. Press Play to start the current song.');
+  }
+});
 on('answer-year', 'change', () => {
   const round = currentRound(state.game);
   if (!round) return;
-  const year = Number.parseInt($('answer-year').value, 10);
-  if (Number.isFinite(year) && year >= 1800 && year <= 2100) state.yearOverrides[round.trackId] = year;
+  const yearText = $('answer-year').value.trim();
+  const year = Number(yearText);
+  if (/^\d{4}$/.test(yearText) && Number.isFinite(year) && year >= 1800 && year <= 2100) state.yearOverrides[round.trackId] = year;
   else delete state.yearOverrides[round.trackId];
   localStorage.setItem(KEYS.yearOverrides, JSON.stringify(state.yearOverrides));
   renderAnswer();
 });
+on('answer-year', 'blur', () => renderAnswer());
 on('back-to-setup', 'click', async () => {
-  await spotify().pause($('device').value || undefined).catch(() => {});
+  const deviceId = $('device').value;
+  if (deviceId === EMBEDDED_DEVICE) {
+    if (embeddedPlayerIsOpen() && embeddedPlayerReady) postEmbeddedMessage('pause');
+  } else {
+    await spotify().pause(deviceId || undefined).catch(() => {});
+  }
   showScreen('setup');
   renderSetup();
 });
@@ -476,7 +796,7 @@ on('reset-scores', 'click', () => {
 
 document.addEventListener('keydown', (e) => {
   if ($('game').hidden || e.target.closest('input, select, textarea, button') || e.ctrlKey || e.metaKey || e.altKey) return;
-  const actions = { ' ': 'play-pause', r: 'reveal', n: 'next' };
+  const actions = { ' ': 'play-pause', r: 'wrong-reveal', n: 'next' };
   const id = actions[e.key.toLowerCase()];
   if (id) {
     e.preventDefault();
@@ -488,11 +808,27 @@ document.addEventListener('keydown', (e) => {
 
 (async function init() {
   showScreen('setup');
+  $('setup-settings').open = !state.clientId || !isLoggedIn();
   renderSetup();
   try {
     if (state.clientId && (await handleRedirect(state.clientId))) setStatus('Connected to Spotify ✓');
     renderSetup();
-    if (state.clientId && isLoggedIn()) await loadPlaylist();
+    const playlistId = parsePlaylistId(state.playlistInput);
+    const cache = loadJson(KEYS.playlistCache, null);
+    if (
+      playlistId &&
+      cache?.playlistId === playlistId &&
+      Array.isArray(cache.tracks) &&
+      cache.tracks.every((track) => track && typeof track.id === 'string' && typeof track.uri === 'string')
+    ) {
+      state.playlistName = typeof cache.name === 'string' ? cache.name : null;
+      state.tracks = new Map(cache.tracks.map((track) => [track.id, track]));
+      if (state.clientId && isLoggedIn()) $('setup-settings').open = false;
+      setStatus(`Playlist ready from cache: ${state.tracks.size.toLocaleString()} songs`);
+      renderSetup();
+    } else if (state.clientId && isLoggedIn()) {
+      await loadPlaylist();
+    }
   } catch (err) {
     reportError(err);
   }

@@ -8,6 +8,12 @@
 const MB_BASE = 'https://musicbrainz.org/ws/2';
 const MIN_YEAR = 1800;
 
+export function formatYear(year) {
+  if (year === 1977) return 'Star Wars';
+  if (year === 2001) return 'Towers';
+  return String(year);
+}
+
 export function yearFromDate(date) {
   const match = typeof date === 'string' ? date.match(/^(\d{4})/) : null;
   if (!match) return null;
