@@ -138,9 +138,9 @@ test('scores count artist, title and year separately', () => {
   assert.equal(roundPoints(game.rounds[0], alice.id), 2);
   assert.equal(roundPoints(game.rounds[0], team.id), 1);
   nextRound(game, ['x', 'y']);
-  setAward(game, 1, alice.id, 'year');
-  passTurn(game, 1, alice.id);
   setAward(game, 1, team.id, 'artist');
+  passTurn(game, 1, team.id);
+  setAward(game, 1, alice.id, 'year');
 
   const [first, second] = standings(game);
   assert.equal(first.contestant.name, 'Alice');
