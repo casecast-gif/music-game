@@ -84,4 +84,4 @@ npm test           # unit tests (node --test)
 
 ## Deployment
 
-The production site is <https://casecast-gif.github.io/music-game/>. Each push to `main` runs the tests and deploys `public/` to GitHub Pages when they pass. To enable the first deployment, open the repository's **Settings → Pages** and set **Build and deployment → Source** to **GitHub Actions**. Use **Actions → Test and deploy to GitHub Pages → Run workflow** to publish manually without pushing another commit.
+The production site is <https://casecast-gif.github.io/music-game/>. Pushes to `main` run tests only; deployment happens only when the workflow is manually dispatched. To enable the first deployment, open the repository's **Settings → Pages** and set **Build and deployment → Source** to **GitHub Actions**. To publish, use **Actions → Test and deploy to GitHub Pages → Run workflow**.

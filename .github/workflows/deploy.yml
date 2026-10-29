@@ -26,6 +26,7 @@ jobs:
         run: npm test
 
   deploy:
+    if: github.event_name == 'workflow_dispatch'
     needs: test
     runs-on: ubuntu-latest
     permissions:
