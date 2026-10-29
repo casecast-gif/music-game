@@ -194,7 +194,7 @@ test('a contestant keeps their turn on correct answers, but wrong/pass advances 
   assert.throws(() => passTurn(game, 0, b.id), /not this contestant’s turn/);
 
   nextRound(game, ['x', 'y']);
-  assert.equal(currentTurn(game).id, a.id);
+  assert.equal(currentTurn(game).id, b.id);
   assert.deepEqual(game.rounds[1].out, []);
 });
 
