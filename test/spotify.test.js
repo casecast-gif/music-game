@@ -369,7 +369,11 @@ test('api preserves HTTP status when Spotify returns a non-JSON error', async (t
     else globalThis.localStorage = previousLocalStorage;
   });
   globalThis.localStorage = {
-    getItem: () => JSON.stringify({ accessToken: 'test-token', expiresAt: Date.now() + 60_000 }),
+    getItem: (key) => key === 'musicGame.spotifyToken'
+      ? JSON.stringify({ accessToken: 'test-token', expiresAt: Date.now() + 60_000 })
+      : null,
+    removeItem: () => {},
+    setItem: () => {},
   };
   globalThis.fetch = async () => new Response('opaque upstream response', {
     status: 403,
