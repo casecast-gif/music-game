@@ -97,6 +97,23 @@ test('togglePlay starts the current song when Spotify has no active playback', a
   assert.equal(await client.togglePlay('device-id'), false);
 });
 
+test('togglePlay toggles the current track on the browser player', async () => {
+  const client = new SpotifyClient('unused');
+  let toggled = false;
+  client.deviceId = 'browser-device';
+  client.player = {
+    async getCurrentState() {
+      return { track_window: { current_track: { uri: 'spotify:track:abc' } } };
+    },
+    async togglePlay() {
+      toggled = true;
+    },
+  };
+
+  assert.equal(await client.togglePlay('browser-device', 'spotify:track:abc'), true);
+  assert.equal(toggled, true);
+});
+
 test('togglePlay retries one malformed successful playback-state response', async () => {
   const client = new SpotifyClient('unused');
   let stateReads = 0;

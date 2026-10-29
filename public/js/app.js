@@ -695,7 +695,7 @@ on('enable-browser-player', 'click', async () => {
 });
 on('play-pause', 'click', async () => {
   spotify().activate();
-  const deviceId = $('device').value;
+  let deviceId = $('device').value;
   const round = currentRound(state.game);
   const track = round && state.tracks.get(round.trackId);
   if (!track) return;
@@ -711,7 +711,8 @@ on('play-pause', 'click', async () => {
     setStatus(action === 'play' ? 'Starting playback in the Spotify player window…' : 'Pausing the Spotify player…');
     return;
   }
-  if (!deviceId || deviceId === BROWSER_DEVICE) return playCurrent();
+  if (deviceId === BROWSER_DEVICE) deviceId = spotify().deviceId;
+  if (!deviceId) return playCurrent();
   if (!(await spotify().togglePlay(deviceId, track.uri))) await playCurrent();
 });
 on('replay', 'click', () => {
