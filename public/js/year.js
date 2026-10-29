@@ -39,6 +39,62 @@ export function normalize(text) {
     .replace(/[^a-z0-9]+/g, '');
 }
 
+const SMALL_WORDS = new Set(['a', 'an', 'and', 'at', 'by', 'for', 'in', 'of', 'on', 'the', 'to', 'with']);
+
+function normalizedWithoutSmallWords(text) {
+  const words = String(text ?? '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, ' and ')
+    .match(/[a-z0-9]+/g) ?? [];
+  return words.filter((word) => !SMALL_WORDS.has(word)).join('');
+}
+
+function withinEditDistance(left, right, limit) {
+  if (Math.abs(left.length - right.length) > limit) return false;
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i++) {
+    const current = [i];
+    let rowMinimum = i;
+    for (let j = 1; j <= right.length; j++) {
+      current[j] = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1),
+      );
+      rowMinimum = Math.min(rowMinimum, current[j]);
+    }
+    if (rowMinimum > limit) return false;
+    previous = current;
+  }
+  return previous[right.length] <= limit;
+}
+
+export function guessMatches(guess, acceptedAnswers) {
+  const normalizedGuess = normalize(guess);
+  if (!normalizedGuess) return false;
+  const guessWithoutSmallWords = normalizedWithoutSmallWords(guess);
+  return acceptedAnswers.some((answer) => {
+    const normalizedAnswer = normalize(answer);
+    if (!normalizedAnswer) return false;
+    if (normalizedAnswer === normalizedGuess) return true;
+
+    const answerWithoutSmallWords = normalizedWithoutSmallWords(answer);
+    if (guessWithoutSmallWords.length >= 4 && guessWithoutSmallWords === answerWithoutSmallWords) return true;
+
+    const length = Math.max(normalizedGuess.length, normalizedAnswer.length);
+    const editLimit = length >= 12 ? 2 : length >= 5 ? 1 : 0;
+    return editLimit > 0 && withinEditDistance(normalizedGuess, normalizedAnswer, editLimit);
+  });
+}
+
+export function guessMatchCategories(guess, answersByCategory) {
+  return Object.entries(answersByCategory ?? {})
+    .filter(([, answers]) => guessMatches(guess, answers))
+    .map(([category]) => category);
+}
+
 function earliestYear(recordings) {
   const years = recordings.map((r) => yearFromDate(r['first-release-date'])).filter((y) => y !== null);
   return years.length ? Math.min(...years) : null;

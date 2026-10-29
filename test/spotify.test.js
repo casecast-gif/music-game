@@ -53,7 +53,7 @@ test('normalizePlaylistItem skips episodes, local files and removed tracks', () 
   assert.equal(normalizePlaylistItem(null), null);
 });
 
-test('getPlaylistTracks loads pages concurrently in order and reports progress', async () => {
+test('getPlaylistTracks loads pages sequentially in order and reports progress', async () => {
   const client = new SpotifyClient('unused');
   const total = 423;
   let activeRequests = 0;
@@ -84,9 +84,65 @@ test('getPlaylistTracks loads pages concurrently in order and reports progress',
   assert.equal(tracks.length, total);
   assert.equal(tracks[0].id, 'track-0');
   assert.equal(tracks.at(-1).id, `track-${total - 1}`);
-  assert.equal(peakRequests, 2);
+  assert.equal(peakRequests, 1);
   assert.equal(rateLimitRetries, 1);
   assert.deepEqual(progress.at(-1), [total, total]);
+});
+
+test('getPlaylistTracks does not retry a development quota-exceeded response', async () => {
+  const client = new SpotifyClient('unused');
+  let requests = 0;
+  client.api = async () => {
+    requests += 1;
+    throw Object.assign(new Error('Too many requests'), {
+      status: 429,
+      reason: 'QUOTA_EXCEEDED',
+      retryAfter: 70540,
+    });
+  };
+
+  await assert.rejects(client.getPlaylistTracks('playlist-id'), { status: 429, reason: 'QUOTA_EXCEEDED' });
+  assert.equal(requests, 1);
+});
+
+test('Spotify quota cooldown blocks subsequent requests in the same browser profile', async (t) => {
+  const previous = {
+    fetch: globalThis.fetch,
+    localStorage: globalThis.localStorage,
+  };
+  t.after(() => {
+    if (previous.fetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = previous.fetch;
+    if (previous.localStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previous.localStorage;
+  });
+
+  const values = new Map([[
+    'musicGame.spotifyToken',
+    JSON.stringify({ accessToken: 'test-token', expiresAt: Date.now() + 60_000 }),
+  ]]);
+  globalThis.localStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests += 1;
+    return {
+      status: 429,
+      ok: false,
+      headers: { get: (name) => name.toLowerCase() === 'retry-after' ? '70540' : null },
+      text: async () => JSON.stringify({
+        error: { status: 429, message: 'Too many requests', reason: 'QUOTA_EXCEEDED' },
+      }),
+    };
+  };
+  const client = new SpotifyClient('unused');
+
+  await assert.rejects(client.api('/me'), { status: 429, reason: 'QUOTA_EXCEEDED' });
+  await assert.rejects(client.api('/me'), /No API request was sent/);
+  assert.equal(requests, 1);
 });
 
 test('togglePlay starts the current song when Spotify has no active playback', async () => {
@@ -313,7 +369,11 @@ test('api preserves HTTP status when Spotify returns a non-JSON error', async (t
     else globalThis.localStorage = previousLocalStorage;
   });
   globalThis.localStorage = {
-    getItem: () => JSON.stringify({ accessToken: 'test-token', expiresAt: Date.now() + 60_000 }),
+    getItem: (key) => key === 'musicGame.spotifyToken'
+      ? JSON.stringify({ accessToken: 'test-token', expiresAt: Date.now() + 60_000 })
+      : null,
+    removeItem: () => {},
+    setItem: () => {},
   };
   globalThis.fetch = async () => new Response('opaque upstream response', {
     status: 403,

@@ -40,6 +40,7 @@ code { background: #2a2a2a; padding: 0.1rem 0.35rem; border-radius: 4px; }
 .connection-summary strong { color: var(--text); font-weight: 600; }
 .game-modes { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1rem; }
 .target-score-setting { display: grid; grid-template-columns: auto minmax(6rem, 8rem); align-items: center; gap: 0.4rem 0.75rem; margin-top: 1rem; }
+.target-score-setting[hidden] { display: none; }
 .target-score-setting label { flex: initial; color: var(--text); font-size: 1rem; }
 .target-score-setting .hint { grid-column: 1 / -1; }
 .settings { margin-top: 1.5rem; border-top: 1px solid var(--border); padding-top: 0.75rem; }
@@ -72,9 +73,25 @@ code { background: #2a2a2a; padding: 0.1rem 0.35rem; border-radius: 4px; }
 .score-table th:first-child, .score-table td:first-child { text-align: left; }
 aside .score-table td:nth-child(2), aside .score-table th:nth-child(2) { text-align: left; }
 .score-table .members { display: block; font-size: 0.75rem; color: var(--muted); }
+.score-table .contestant-status { color: var(--danger); }
 .toggle { min-width: 3rem; border-radius: 8px; padding: 0.45rem 0.6rem; }
 .toggle[aria-pressed='true'] { background: var(--accent); color: #000; border-color: var(--accent); }
 .leader td { color: var(--accent); font-weight: 700; }
+.turn-indicator { margin: 0.25rem 0 0.6rem; color: var(--accent); font-weight: 600; }
+#round-scoring tr.current-turn td { background: #203328; }
+#round-scoring tr.out td { color: var(--muted); }
+#round-scoring tr.out .toggle { opacity: 0.35; }
+.manual-clock-controls { display: flex; align-items: center; gap: 1rem; margin: 0.5rem 0 0.75rem; }
+.manual-clock-display { color: var(--danger); font-size: clamp(2.5rem, 8vw, 4rem); font-variant-numeric: tabular-nums; font-weight: 800; line-height: 1; }
+.auto-turn { margin: 0.75rem 0 1rem; padding: 1rem; border: 1px solid var(--border); border-radius: 10px; background: #202020; }
+.turn-clock { display: flex; align-items: center; gap: 0.75rem; font-variant-numeric: tabular-nums; font-size: 1.15rem; font-weight: 700; }
+.turn-clock progress { flex: 1; height: 1rem; accent-color: var(--accent); }
+.guess-form { display: grid; grid-template-columns: minmax(8rem, 0.6fr) minmax(12rem, 1fr); align-items: center; gap: 0.6rem 0.8rem; margin-top: 0.8rem; }
+.guess-form label { color: var(--text); }
+.guess-actions { display: flex; gap: 0.6rem; grid-column: 2; }
+.guess-feedback { min-height: 1.4em; margin: 0.6rem 0 0; font-weight: 600; }
+.guess-feedback.correct { color: var(--accent); }
+.guess-feedback.incorrect { color: #ff9a94; }
 
 .history { padding-left: 1.5rem; max-height: 260px; overflow: auto; font-size: 0.9rem; }
 .history li { margin: 0.25rem 0; }
@@ -83,3 +100,7 @@ aside .score-table td:nth-child(2), aside .score-table th:nth-child(2) { text-al
 .spotify-player-page main { max-width: 520px; padding-top: 1rem; }
 .spotify-player-panel h1 { margin: 0 0 0.5rem; font-size: 1.25rem; }
 .spotify-player-panel #spotify-embed { min-height: 352px; }
+@media (max-width: 600px) {
+  .guess-form { grid-template-columns: 1fr; }
+  .guess-actions { grid-column: 1; }
+}

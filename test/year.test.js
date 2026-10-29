@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   cleanTitle,
   formatYear,
+  guessMatchCategories,
+  guessMatches,
   normalize,
   resolveOriginalYear,
   yearFromDate,
@@ -32,6 +34,21 @@ test('cleanTitle strips remaster / version suffixes', () => {
   assert.equal(cleanTitle('(I Can\'t Get No) Satisfaction'), "(I Can't Get No) Satisfaction");
   assert.equal(normalize('The Beatles'), normalize('beatles'));
   assert.equal(normalize('Simon & Garfunkel'), normalize('Simon and Garfunkel'));
+});
+
+test('guessMatches tolerates normalization, small-word omissions, and small typos without partial matches', () => {
+  assert.equal(guessMatches('Beyonce!', ['Beyoncé']), true);
+  assert.equal(guessMatches('the who', ['Who']), true);
+  assert.equal(guessMatches('I Want Hold Your Hand', ['I Want to Hold Your Hand']), true);
+  assert.equal(guessMatches('Bohemian Rhapsoddy', ['Bohemian Rhapsody']), true);
+  assert.equal(guessMatches('Bohemian', ['Bohemian Rhapsody']), false);
+  assert.equal(guessMatches(' ', ['Answer']), false);
+});
+
+test('guessMatchCategories returns only a unique matching category', () => {
+  assert.deepEqual(guessMatchCategories('Beyonce', { artist: ['Beyoncé'], title: ['Halo'] }), ['artist']);
+  assert.deepEqual(guessMatchCategories('Same', { artist: ['Same'], title: ['Same'] }), ['artist', 'title']);
+  assert.deepEqual(guessMatchCategories('No match', { artist: ['Beyoncé'], title: ['Halo'] }), []);
 });
 
 test('ISRC response yields earliest first-release-date', () => {
