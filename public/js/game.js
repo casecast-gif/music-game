@@ -3,6 +3,12 @@
 export const CATEGORIES = ['artist', 'title', 'year'];
 export const CATEGORY_LABELS = { artist: 'Artist', title: 'Song', year: 'Year' };
 export const DEFAULT_TARGET_SCORE = 15;
+export const FIRST_GUESS_SECONDS = 60;
+export const FOLLOWUP_GUESS_SECONDS = 20;
+
+export function guessTimeLimitSeconds(round) {
+  return (round?.out?.length ?? 0) === 0 ? FIRST_GUESS_SECONDS : FOLLOWUP_GUESS_SECONDS;
+}
 
 const PLAYLIST_ID_RE = /^[A-Za-z0-9]{22}$/;
 
@@ -61,11 +67,12 @@ export function isTeam(contestant) {
   return contestant.members.length > 0;
 }
 
-export function createGame({ playlistId = null, contestants = [], targetScore = DEFAULT_TARGET_SCORE } = {}) {
+export function createGame({ playlistId = null, contestants = [], targetScore = DEFAULT_TARGET_SCORE, mode = 'no-steve' } = {}) {
   return {
     playlistId,
     contestants: contestants.slice(),
     targetScore: Number.isSafeInteger(targetScore) && targetScore > 0 ? targetScore : DEFAULT_TARGET_SCORE,
+    mode: mode === 'im-steve' ? 'im-steve' : 'no-steve',
     deck: [], // remaining track ids to play, in order
     rounds: [], // { trackId, awards: { [contestantId]: { artist, title, year } } }
   };
@@ -80,9 +87,26 @@ export function addContestant(game, contestant) {
 }
 
 export function removeContestant(game, contestantId) {
+  const removedIndex = game.contestants.findIndex((c) => c.id === contestantId);
   game.contestants = game.contestants.filter((c) => c.id !== contestantId);
-  for (const round of game.rounds) delete round.awards[contestantId];
+  for (const round of game.rounds) {
+    delete round.awards[contestantId];
+    round.out = (round.out ?? []).filter((id) => id !== contestantId);
+    if (round.currentTurnId === contestantId) {
+      round.currentTurnId = nextActiveContestant(game.contestants, round, removedIndex - 1)?.id ?? null;
+    }
+  }
   return game;
+}
+
+function nextActiveContestant(contestants, round, previousIndex) {
+  if (!contestants.length) return null;
+  for (let offset = 1; offset <= contestants.length; offset++) {
+    const index = (previousIndex + offset + contestants.length) % contestants.length;
+    const contestant = contestants[index];
+    if (!round.out?.includes(contestant.id)) return contestant;
+  }
+  return null;
 }
 
 /**
@@ -107,7 +131,16 @@ export function nextRound(game, trackIds, rng = Math.random) {
   if (game.deck.length === 0) buildDeck(game, trackIds, rng);
   const trackId = game.deck.shift();
   if (!trackId) return null;
-  game.rounds.push({ trackId, awards: {} });
+  const startingContestantIndex = game.contestants.length ? game.rounds.length % game.contestants.length : 0;
+  game.rounds.push({
+    trackId,
+    awards: {},
+    out: [],
+    currentTurnId: game.contestants[startingContestantIndex]?.id ?? null,
+    turnDeadlineAt: null,
+    listenDeadlineAt: null,
+    phase: 'listening',
+  });
   return trackId;
 }
 
@@ -115,17 +148,58 @@ export function currentRound(game) {
   return game.rounds[game.rounds.length - 1] ?? null;
 }
 
-/** Toggles (or explicitly sets) whether a contestant got a category right in a round. */
-export function setAward(game, roundIndex, contestantId, category, value) {
+export function currentTurn(game) {
+  const round = currentRound(game);
+  return game.contestants.find((contestant) => contestant.id === round?.currentTurnId) ?? null;
+}
+
+/** Awards an unsolved category to the contestant whose turn it is. */
+export function setAward(game, roundIndex, contestantId, category) {
   if (!CATEGORIES.includes(category)) throw new Error(`Unknown category: ${category}`);
   const round = game.rounds[roundIndex];
   if (!round) throw new Error(`No round ${roundIndex}`);
   if (!game.contestants.some((c) => c.id === contestantId)) {
     throw new Error(`Unknown contestant: ${contestantId}`);
   }
+  if (round.currentTurnId !== contestantId || round.out?.includes(contestantId)) {
+    throw new Error('It is not this contestant’s turn');
+  }
+  if (scoredCategories(round, game.contestants).includes(category)) {
+    throw new Error(`${CATEGORY_LABELS[category]} has already been identified`);
+  }
   const awards = (round.awards[contestantId] ??= { artist: false, title: false, year: false });
-  awards[category] = value === undefined ? !awards[category] : Boolean(value);
-  return awards[category];
+  awards[category] = true;
+  return true;
+}
+
+/** Marks the current contestant out for this song and advances to the next active contestant. */
+export function passTurn(game, roundIndex, contestantId) {
+  const round = game.rounds[roundIndex];
+  if (!round) throw new Error(`No round ${roundIndex}`);
+  const currentIndex = game.contestants.findIndex((c) => c.id === contestantId);
+  if (currentIndex === -1) throw new Error(`Unknown contestant: ${contestantId}`);
+  if (round.currentTurnId !== contestantId || round.out?.includes(contestantId)) {
+    throw new Error('It is not this contestant’s turn');
+  }
+  round.out ??= [];
+  round.out.push(contestantId);
+  round.currentTurnId = nextActiveContestant(game.contestants, round, currentIndex)?.id ?? null;
+  round.turnDeadlineAt = null;
+  return round.currentTurnId;
+}
+
+/** Scores a correct single guess, then advances the current contestant either way. */
+export function resolveGuess(game, roundIndex, contestantId, category, correct) {
+  if (!CATEGORIES.includes(category)) throw new Error(`Unknown category: ${category}`);
+  if (typeof correct !== 'boolean') throw new Error('Guess result must be true or false');
+  const round = game.rounds[roundIndex];
+  if (!round) throw new Error(`No round ${roundIndex}`);
+  if (scoredCategories(round, game.contestants).includes(category)) {
+    throw new Error(`${CATEGORY_LABELS[category]} has already been identified`);
+  }
+  if (correct) setAward(game, roundIndex, contestantId, category);
+  const nextTurnId = passTurn(game, roundIndex, contestantId);
+  return { correct, nextTurnId };
 }
 
 export function getAward(round, contestantId, category) {
@@ -180,18 +254,42 @@ export function deserializeGame(json) {
   try {
     const data = JSON.parse(json);
     if (!data || !Array.isArray(data.contestants) || !Array.isArray(data.rounds)) return null;
+    const contestants = data.contestants
+      .filter((c) => c && typeof c.id === 'string' && typeof c.name === 'string')
+      .map((c) => ({ id: c.id, name: c.name, members: Array.isArray(c.members) ? c.members.map(String) : [] }));
     return {
       playlistId: typeof data.playlistId === 'string' ? data.playlistId : null,
-      contestants: data.contestants
-        .filter((c) => c && typeof c.id === 'string' && typeof c.name === 'string')
-        .map((c) => ({ id: c.id, name: c.name, members: Array.isArray(c.members) ? c.members.map(String) : [] })),
+      contestants,
       targetScore: Number.isSafeInteger(data.targetScore) && data.targetScore > 0 ? data.targetScore : DEFAULT_TARGET_SCORE,
+      mode: data.mode === 'no-steve' ? 'no-steve' : 'im-steve',
       deck: Array.isArray(data.deck) ? data.deck.filter((id) => typeof id === 'string') : [],
       rounds: data.rounds
         .filter((r) => r && typeof r.trackId === 'string')
-        .map((r) => ({ trackId: r.trackId, awards: r.awards && typeof r.awards === 'object' ? r.awards : {} })),
+        .map((r) => {
+          const out = Array.isArray(r.out) ? r.out.filter((id) => typeof id === 'string') : [];
+          const hasTurn = Object.hasOwn(r, 'currentTurnId');
+          const savedTurn = typeof r.currentTurnId === 'string' ? r.currentTurnId : null;
+          const currentTurnId = hasTurn
+            ? gameContestantIsActive(contestants, savedTurn, out) ? savedTurn : null
+            : contestants.find((contestant) => !out.includes(contestant.id))?.id ?? null;
+          return {
+            trackId: r.trackId,
+            awards: r.awards && typeof r.awards === 'object' ? r.awards : {},
+            out,
+            currentTurnId,
+            turnDeadlineAt: Number.isSafeInteger(r.turnDeadlineAt) && r.turnDeadlineAt > 0 ? r.turnDeadlineAt : null,
+            listenDeadlineAt: Number.isSafeInteger(r.listenDeadlineAt) && r.listenDeadlineAt > 0 ? r.listenDeadlineAt : null,
+            phase: ['listening', 'turn', 'manual', 'reveal', 'game-over'].includes(r.phase) ? r.phase : null,
+          };
+        }),
     };
   } catch {
     return null;
   }
+}
+
+function gameContestantIsActive(contestants, contestantId, out) {
+  return contestantId !== null
+    && contestants.some((contestant) => contestant?.id === contestantId)
+    && !out.includes(contestantId);
 }

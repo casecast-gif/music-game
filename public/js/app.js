@@ -3,15 +3,19 @@ import {
   CATEGORIES,
   CATEGORY_LABELS,
   DEFAULT_TARGET_SCORE,
+  guessTimeLimitSeconds,
   addContestant,
   createContestant,
   createGame,
   currentRound,
+  currentTurn,
   deserializeGame,
   isTeam,
   nextRound,
   parsePlaylistId,
+  passTurn,
   removeContestant,
+  resolveGuess,
   resetScores,
   roundPoints,
   scoredCategories,
@@ -21,22 +25,27 @@ import {
   standings,
 } from './game.js';
 import { SpotifyClient, handleRedirect, isLoggedIn, logout, redirectUri, startLogin } from './spotify.js';
-import { cleanTitle, formatYear, resolveOriginalYear, yearFromDate } from './year.js';
+import { MOCK_PLAYLIST_NAME, MOCK_TRACKS, MockSpotifyClient } from './mock-spotify.js';
+import { cleanTitle, formatYear, guessMatches, resolveOriginalYear, yearFromDate } from './year.js';
 
 const KEYS = {
   clientId: 'musicGame.clientId',
   playlist: 'musicGame.playlist',
   playlistCache: 'musicGame.playlistCache',
   targetScore: 'musicGame.targetScore',
+  mode: 'musicGame.mode',
   game: 'musicGame.game',
   years: 'musicGame.years',
   yearOverrides: 'musicGame.yearOverrides',
   deviceId: 'musicGame.deviceId',
+  spotifyApiMode: 'musicGame.spotifyApiMode',
 };
 
 const BROWSER_DEVICE = '__browser__';
 const EMBEDDED_DEVICE = '__spotify_embed__';
 const EMBEDDED_CHANNEL = 'music-game-spotify-player';
+const LISTEN_DURATION_MS = 15_000;
+const ROUND_REVEAL_MS = 6_000;
 const $ = (id) => document.getElementById(id);
 let embeddedPlayerWindow = null;
 let embeddedPlayerReady = false;
@@ -52,18 +61,60 @@ function loadJson(key, fallback) {
   }
 }
 
+function loadMockPlaylist() {
+  state.loadingPlaylist = false;
+  state.playlistName = MOCK_PLAYLIST_NAME;
+  state.tracks = new Map(MOCK_TRACKS.map((track) => [track.id, { ...track, artists: [...track.artists] }]));
+  renderSetup();
+  setStatus('Mock samples loaded. No external API requests were made.');
+}
+
+function setSpotifyApiMode(mode, { persist = true } = {}) {
+  state.spotifyApiMode = mode === 'live' ? 'live' : 'mock';
+  if (persist) localStorage.setItem(KEYS.spotifyApiMode, state.spotifyApiMode);
+  state.spotify = null;
+  state.playerPromise = null;
+  state.selectedDeviceId = '';
+  localStorage.removeItem(KEYS.deviceId);
+  if (state.spotifyApiMode === 'mock') {
+    loadMockPlaylist();
+    return;
+  }
+  if (state.playlistName === MOCK_PLAYLIST_NAME) {
+    state.playlistName = null;
+    state.tracks = new Map();
+  }
+  renderSetup();
+  setStatus('Live Spotify selected. No request was made; load the playlist or log in only when ready.');
+}
+
 function loadTargetScore() {
   const score = Number(localStorage.getItem(KEYS.targetScore));
   return Number.isSafeInteger(score) && score > 0 ? score : DEFAULT_TARGET_SCORE;
 }
 
+function loadSelectedMode(savedGame) {
+  const savedMode = localStorage.getItem(KEYS.mode);
+  if (savedMode === 'no-steve' || savedMode === 'im-steve') return savedMode;
+  return savedGame.mode;
+}
+
+const initialGame = deserializeGame(localStorage.getItem(KEYS.game)) ?? createGame();
+
 const state = {
+  spotifyApiMode: localStorage.getItem(KEYS.spotifyApiMode) === 'live' ? 'live' : 'mock',
   clientId: localStorage.getItem(KEYS.clientId) ?? DEFAULT_SPOTIFY_CLIENT_ID,
   playlistInput: localStorage.getItem(KEYS.playlist) ?? DEFAULT_PLAYLIST_URL,
   playlistName: null,
   tracks: new Map(),
-  game: deserializeGame(localStorage.getItem(KEYS.game)) ?? createGame(),
+  game: initialGame,
+  selectedMode: loadSelectedMode(initialGame),
   targetScore: loadTargetScore(),
+  roundPhase: 'idle',
+  turnTimerInterval: null,
+  advanceTimeout: null,
+  recognition: null,
+  listeningDeadlineAt: null,
   revealedAnswers: { artist: false, title: false, year: false },
   years: loadJson(KEYS.years, {}),
   yearOverrides: loadJson(KEYS.yearOverrides, {}),
@@ -91,7 +142,10 @@ function reportError(err) {
 }
 
 function spotify() {
-  if (!state.spotify || state.spotify.clientId !== state.clientId) state.spotify = new SpotifyClient(state.clientId);
+  const mock = state.spotifyApiMode === 'mock';
+  if (!state.spotify || state.spotify.clientId !== state.clientId || Boolean(state.spotify.isMock) !== mock) {
+    state.spotify = mock ? new MockSpotifyClient(state.clientId) : new SpotifyClient(state.clientId);
+  }
   return state.spotify;
 }
 
@@ -99,13 +153,41 @@ function spotify() {
 
 function renderSetup() {
   const loggedIn = Boolean(state.clientId) && isLoggedIn();
+  const mock = state.spotifyApiMode === 'mock';
+  const noSteve = state.selectedMode === 'no-steve';
+  $('mode-no-steve').setAttribute('aria-pressed', String(noSteve));
+  $('mode-im-steve').setAttribute('aria-pressed', String(!noSteve));
+  $('mode-no-steve').classList.toggle('primary', noSteve);
+  $('mode-im-steve').classList.toggle('primary', !noSteve);
+  $('turn-duration-setting').hidden = !noSteve;
+  $('mode-description').textContent = noSteve
+    ? 'No host needed: the screen runs timed turns, checks submitted guesses, keeps wrong answers hidden, and advances automatically.'
+    : 'Host-controlled play: a host operates the reveal and scoring controls, and decides when to move on.';
+  $('target-score-hint').textContent = noSteve
+    ? 'Points combine correct Artist, Song, and Year guesses. The game ends after the current song when someone reaches the target.'
+    : 'Points combine correct Artist, Song, and Year guesses. The target stays visible on the scoreboard but does not stop play.';
   $('client-id').value = state.clientId;
   $('redirect-uri').textContent = redirectUri();
   $('login').textContent = loggedIn ? 'Connected ✓ (log in again)' : 'Log in with Spotify';
-  $('logout').hidden = !loggedIn;
   $('playlist').value = state.playlistInput;
   $('target-score').value = String(state.targetScore);
-  $('spotify-state').textContent = loggedIn ? 'Connected' : 'Not connected';
+  $('spotify-api-mode').value = state.spotifyApiMode;
+  $('spotify-mode-help').textContent = mock
+    ? 'Mock mode uses bundled sample songs and silent simulated playback. It sends no Spotify or MusicBrainz requests.'
+    : 'Live mode never loads a playlist on page startup. Login, playlist, device, and playback actions may contact Spotify.';
+  $('spotify-form').hidden = mock;
+  $('redirect-uri-hint').hidden = mock;
+  $('client-id').disabled = mock;
+  $('login').disabled = mock;
+  $('logout').hidden = mock || !loggedIn;
+  $('enable-browser-player').disabled = mock;
+  $('playlist').disabled = mock;
+  $('playlist-form').querySelector('button').textContent = mock ? 'Reload mock samples' : 'Load playlist';
+  $('playlist-form').querySelector('button').disabled = state.loadingPlaylist;
+  $('spotify-state').textContent = mock ? 'Mock mode (offline)' : loggedIn ? 'Connected' : 'Not connected';
+  $('playback-hint').textContent = mock
+    ? 'Mock playback is silent and simulated. Select Live Spotify API to play real audio.'
+    : 'Full-song playback uses a Spotify device or the browser player. The Spotify preview player is reserved for Name That Tune mode.';
   $('playlist-state').textContent = state.loadingPlaylist
     ? 'Loading…'
     : state.tracks.size
@@ -116,7 +198,11 @@ function renderSetup() {
   if (state.tracks.size) {
     info.textContent = `Loaded “${state.playlistName ?? 'playlist'}” — ${state.tracks.size} songs.`;
   } else {
-    info.textContent = loggedIn ? 'Playlist not loaded yet.' : 'Log in to load the playlist.';
+    info.textContent = mock
+      ? 'Mock sample songs are not loaded.'
+      : loggedIn
+        ? 'Click Load playlist to request songs from Spotify.'
+        : 'Log in with Spotify, then click Load playlist.';
   }
 
   const list = $('contestant-list');
@@ -141,14 +227,26 @@ function renderSetup() {
     }),
   );
 
-  const ready = loggedIn && !state.loadingPlaylist && state.tracks.size > 0 && state.game.contestants.length > 0;
+  const ready = (mock || loggedIn) && !state.loadingPlaylist && state.tracks.size > 0 && state.game.contestants.length > 0;
   $('start').disabled = !ready;
   const resumable = ready && state.game.rounds.length > 0 && state.game.playlistId === parsePlaylistId(state.playlistInput);
   $('resume').hidden = !resumable;
-  $('start').textContent = resumable ? 'Start new game' : 'Start game';
+  $('resume').textContent = `Resume ${state.game.mode === 'no-steve' ? 'No Steve' : 'I’m Steve'} game`;
+  $('start').textContent = resumable ? `Start new ${noSteve ? 'No Steve' : 'I’m Steve'} game` : `Start ${noSteve ? 'No Steve' : 'I’m Steve'} game`;
+}
+
+function selectMode(mode) {
+  state.selectedMode = mode;
+  localStorage.setItem(KEYS.mode, mode);
+  renderSetup();
 }
 
 async function loadPlaylist() {
+  if (state.loadingPlaylist) return;
+  if (state.spotifyApiMode === 'mock') {
+    loadMockPlaylist();
+    return;
+  }
   const playlistId = parsePlaylistId(state.playlistInput);
   if (!playlistId) throw new Error('That does not look like a Spotify playlist link');
   state.loadingPlaylist = true;
@@ -158,15 +256,13 @@ async function loadPlaylist() {
   let name;
   let tracks;
   try {
-    [name, tracks] = await Promise.all([
-      client.getPlaylistName(playlistId),
-      client.getPlaylistTracks(playlistId, {
-        onProgress: (loaded, total) => {
-          setStatus(`Loading playlist… ${loaded.toLocaleString()} / ${total.toLocaleString()}`);
-          $('playlist-state').textContent = `Loading… ${loaded.toLocaleString()} / ${total.toLocaleString()}`;
-        },
-      }),
-    ]);
+    tracks = await client.getPlaylistTracks(playlistId, {
+      onProgress: (loaded, total) => {
+        setStatus(`Loading playlist… ${loaded.toLocaleString()} / ${total.toLocaleString()}`);
+        $('playlist-state').textContent = `Loading… ${loaded.toLocaleString()} / ${total.toLocaleString()}`;
+      },
+    });
+    name = await client.getPlaylistName(playlistId);
   } catch (err) {
     if (err.status === 403) {
       throw new Error('Spotify blocked this playlist (403). Log in as the playlist owner/collaborator or use a copy saved to your account.');
@@ -325,8 +421,7 @@ async function playCurrent() {
         $('device').value = deviceId;
         state.selectedDeviceId = BROWSER_DEVICE;
         localStorage.setItem(KEYS.deviceId, BROWSER_DEVICE);
-        setStatus('This browser is prepared. Click Play again to start the song.');
-        return;
+        setStatus('Browser speaker ready. Starting the game song…');
       }
       deviceId = spotify().deviceId;
     } catch (browserError) {
@@ -346,12 +441,27 @@ async function playCurrent() {
   try {
     setStatus('Starting playback…');
     await spotify().play(track.uri, deviceId);
-    setStatus('Playing… 🎶');
+    setStatus(spotify().isMock
+      ? 'Mock playback is silent. No Spotify API request was made.'
+      : 'Playing… 🎶');
   } catch (err) {
     if (err.status === 404) throw new Error(`Spotify device not found: ${err.message}. Press ↻ and pick an active device.`);
     if (err.status === 403) throw new Error(`Spotify refused playback: ${err.message}. Premium is required for playback control.`);
     throw err;
   }
+}
+
+async function pauseCurrent() {
+  const selectedDevice = $('device').value;
+  if (selectedDevice === EMBEDDED_DEVICE) {
+    if (!postEmbeddedMessage('pause')) {
+      throw new Error('The Spotify player window is not ready to pause playback.');
+    }
+    return;
+  }
+  const deviceId = selectedDevice === BROWSER_DEVICE ? spotify().deviceId : selectedDevice;
+  if (!deviceId) throw new Error('Choose an active Spotify device before the listening clip ends.');
+  await spotify().pause(deviceId);
 }
 
 // ---------- Years ----------
@@ -366,7 +476,13 @@ function yearFor(trackId) {
 
 function prefetchYear(trackId) {
   const track = state.tracks.get(trackId);
-  if (!track || state.yearOverrides[trackId] != null || state.years[trackId] || state.pendingYears.has(trackId)) return;
+  if (
+    state.spotifyApiMode === 'mock' ||
+    !track ||
+    state.yearOverrides[trackId] != null ||
+    state.years[trackId] ||
+    state.pendingYears.has(trackId)
+  ) return;
   state.pendingYears.add(trackId);
   resolveOriginalYear(track)
     .then(({ year, source, complete }) => {
@@ -380,7 +496,10 @@ function prefetchYear(trackId) {
     })
     .finally(() => {
       state.pendingYears.delete(trackId);
-      if (currentRound(state.game)?.trackId === trackId) renderAnswer();
+      if (currentRound(state.game)?.trackId === trackId) {
+        renderAnswer();
+        renderGuessControls();
+      }
       renderHistory();
     });
 }
@@ -414,11 +533,13 @@ function renderAnswer() {
     year: $('reveal-year'),
   };
   for (const [category, button] of Object.entries(revealControls)) {
+    button.hidden = state.game.mode === 'no-steve';
     button.disabled = state.revealedAnswers[category];
     button.textContent = state.revealedAnswers[category]
       ? `${CATEGORY_LABELS[category]} revealed ✓`
       : `Reveal ${CATEGORY_LABELS[category].toLowerCase()}`;
   }
+  $('wrong-reveal').hidden = state.game.mode === 'no-steve';
   $('wrong-reveal').disabled = allAnswersComplete;
   $('cover').src = (allAnswersComplete && track?.image) || '';
   $('cover').hidden = !(allAnswersComplete && track?.image);
@@ -432,7 +553,14 @@ function renderAnswer() {
   const info = track ? yearFor(track.id) : null;
   yearInput.hidden = !state.revealedAnswers.year;
   $('answer-year-placeholder').hidden = state.revealedAnswers.year;
-  if (document.activeElement !== yearInput) yearInput.value = state.revealedAnswers.year && info?.year ? formatYear(info.year) : '?';
+  yearInput.readOnly = state.game.mode === 'no-steve' && !['reveal', 'game-over'].includes(state.roundPhase);
+  if (document.activeElement !== yearInput) {
+    yearInput.value = state.revealedAnswers.year
+      ? info?.year
+        ? formatYear(info.year)
+        : 'Unavailable'
+      : '?';
+  }
   yearInput.classList.toggle('answer-hidden', !state.revealedAnswers.year);
   const sources = { musicbrainz: 'original release (MusicBrainz)', spotify: 'from Spotify album', manual: 'set by host' };
   $('year-source').textContent = !state.revealedAnswers.year
@@ -450,9 +578,30 @@ function renderRoundScoring() {
   const roundIndex = state.game.rounds.length - 1;
   const round = state.game.rounds[roundIndex];
   const body = $('round-scoring');
+  const activeContestant = currentTurn(state.game);
+  const solvedCategories = scoredCategories(round, state.game.contestants);
+  const allCategoriesSolved = solvedCategories.length === CATEGORIES.length;
+  const noSteve = state.game.mode === 'no-steve';
+  const status = {
+    listening: `Listen to the clip. ${activeContestant?.name ?? 'The first player'} goes first.`,
+    turn: activeContestant ? `${activeContestant.name}’s turn — choose one unanswered category.` : 'This song is complete.',
+    manual: activeContestant
+      ? `${activeContestant.name}’s turn — mark correct answers or choose Wrong / Pass.`
+      : 'Everyone is out for this song.',
+    reveal: 'Round complete. The answers are revealed.',
+    'game-over': 'Game over.',
+    idle: 'The game is ready.',
+  };
+  $('current-turn').textContent = status[state.roundPhase]
+    ?? (allCategoriesSolved ? 'All three answers identified.' : activeContestant ? `${activeContestant.name}’s turn.` : 'This song is complete.');
+  $('turn-column-heading').textContent = noSteve ? 'Turn' : 'Wrong / pass';
   body.replaceChildren(
     ...state.game.contestants.map((c) => {
       const tr = document.createElement('tr');
+      const isOut = Boolean(round?.out?.includes(c.id));
+      const isCurrent = activeContestant?.id === c.id && !allCategoriesSolved;
+      if (isOut) tr.classList.add('out');
+      if (isCurrent) tr.classList.add('current-turn');
       const nameCell = document.createElement('td');
       nameCell.textContent = c.name;
       if (isTeam(c)) {
@@ -461,34 +610,363 @@ function renderRoundScoring() {
         members.textContent = c.members.join(', ');
         nameCell.append(members);
       }
+      if (isOut) {
+        const status = document.createElement('span');
+        status.className = 'members contestant-status';
+        status.textContent = 'Turn complete';
+        nameCell.append(status);
+      }
       tr.append(nameCell);
       for (const cat of CATEGORIES) {
         const td = document.createElement('td');
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'toggle';
         const on = getAward(round, c.id, cat);
-        btn.setAttribute('aria-pressed', String(on));
-        btn.setAttribute('aria-label', `${c.name} got the ${CATEGORY_LABELS[cat].toLowerCase()} right`);
-        btn.textContent = on ? '✓' : '—';
-        btn.disabled = !round;
-        btn.addEventListener('click', () => {
-          const scored = setAward(state.game, roundIndex, c.id, cat);
-          if (scored) state.revealedAnswers[cat] = true;
-          saveGame();
-          renderAnswer();
-          renderHistory();
-          renderScores();
-        });
-        td.append(btn);
+        if (noSteve) {
+          td.textContent = on ? '✓' : solvedCategories.includes(cat) ? '—' : '·';
+        } else {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'toggle';
+          button.setAttribute('aria-pressed', String(on));
+          button.setAttribute('aria-label', `${c.name} got the ${CATEGORY_LABELS[cat].toLowerCase()} right`);
+          button.textContent = on ? '✓' : '—';
+          button.disabled = !round || !isCurrent || isOut || solvedCategories.includes(cat);
+          button.addEventListener('click', () => {
+            setAward(state.game, roundIndex, c.id, cat);
+            state.revealedAnswers[cat] = true;
+            saveGame();
+            renderAnswer();
+            renderHistory();
+            renderScores();
+          });
+          td.append(button);
+        }
         tr.append(td);
       }
+      const turnCell = document.createElement('td');
+      if (noSteve) {
+        turnCell.textContent = isCurrent ? 'Now' : isOut ? 'Done' : 'Waiting';
+      } else {
+        const passButton = document.createElement('button');
+        passButton.type = 'button';
+        passButton.className = 'small secondary';
+        passButton.textContent = isOut ? 'Out' : 'Wrong / Pass';
+        passButton.setAttribute('aria-label', `${c.name} guesses wrong or passes`);
+        passButton.disabled = !round || !isCurrent || isOut || allCategoriesSolved;
+        passButton.addEventListener('click', () => {
+          passTurn(state.game, roundIndex, c.id);
+          saveGame();
+          renderScores();
+        });
+        turnCell.append(passButton);
+      }
+      tr.append(turnCell);
       const pts = document.createElement('td');
       pts.textContent = `${round ? roundPoints(round, c.id) : 0}/3`;
       tr.append(pts);
       return tr;
     }),
   );
+  renderGuessControls();
+}
+
+function renderGuessControls() {
+  const round = currentRound(state.game);
+  const activeContestant = currentTurn(state.game);
+  const openCategories = CATEGORIES.filter((category) => !scoredCategories(round, state.game.contestants).includes(category));
+  const yearReady = Boolean(round && yearFor(round.trackId)?.year);
+  const categorySelect = $('guess-category');
+  const options = [new Option('Choose a category…', '')];
+  for (const category of openCategories) {
+    const option = new Option(CATEGORY_LABELS[category], category);
+    if (category === 'year' && !yearReady) {
+      option.disabled = true;
+      option.textContent += round && state.pendingYears.has(round.trackId) ? ' (checking…)': ' (unavailable)';
+    }
+    options.push(option);
+  }
+  const previousCategory = categorySelect.value;
+  categorySelect.replaceChildren(...options);
+  if (options.some((option) => option.value === previousCategory && !option.disabled)) {
+    categorySelect.value = previousCategory;
+  } else {
+    categorySelect.value = options.find((option) => option.value && !option.disabled)?.value ?? '';
+  }
+
+  const canAnswer = state.game.mode === 'no-steve'
+    && state.roundPhase === 'turn'
+    && Boolean(activeContestant)
+    && openCategories.some((category) => category !== 'year' || yearReady);
+  $('auto-turn').hidden = state.game.mode !== 'no-steve' || !['listening', 'turn'].includes(state.roundPhase);
+  $('guess-form').hidden = state.roundPhase !== 'turn' || !activeContestant;
+  categorySelect.disabled = !canAnswer;
+  $('guess-text').disabled = !canAnswer;
+  $('submit-guess').disabled = !canAnswer;
+  $('speak-guess').disabled = !canAnswer || Boolean(state.recognition);
+  $('speak-guess').hidden = !speechRecognitionAvailable();
+  $('pass-guess').disabled = state.roundPhase !== 'turn' || !activeContestant;
+  $('next').disabled = state.roundPhase === 'game-over';
+  $('play-pause').disabled = state.game.mode === 'no-steve' && state.roundPhase === 'turn';
+  $('replay').disabled = state.game.mode === 'no-steve' && state.roundPhase === 'turn';
+  $('next').textContent = state.game.mode === 'no-steve' ? 'Skip song' : '⏭ Next song';
+  if (state.roundPhase === 'listening') {
+    $('turn-progress').max = LISTEN_DURATION_MS / 1000;
+  } else {
+    $('turn-progress').max = guessTimeLimitSeconds(currentRound(state.game));
+  }
+  $('turn-countdown').textContent = '';
+}
+
+function stopRoundClock() {
+  if (state.turnTimerInterval) clearInterval(state.turnTimerInterval);
+  state.turnTimerInterval = null;
+}
+
+function stopVoiceRecognition() {
+  const recognition = state.recognition;
+  if (!recognition) return;
+  state.recognition = null;
+  recognition.onresult = null;
+  recognition.onerror = null;
+  recognition.onend = null;
+  recognition.abort();
+}
+
+function clearAutomationTimers() {
+  stopRoundClock();
+  if (state.advanceTimeout) clearTimeout(state.advanceTimeout);
+  state.advanceTimeout = null;
+  state.listeningDeadlineAt = null;
+  stopVoiceRecognition();
+}
+
+function updateRoundClock() {
+  const now = Date.now();
+  if (state.roundPhase === 'listening' && state.listeningDeadlineAt) {
+    const remaining = Math.max(0, state.listeningDeadlineAt - now);
+    $('turn-progress').max = LISTEN_DURATION_MS / 1000;
+    $('turn-progress').value = Math.ceil(remaining / 1000);
+    $('turn-countdown').textContent = `Listen: ${Math.ceil(remaining / 1000)}s`;
+    if (remaining === 0) {
+      stopRoundClock();
+      beginPlayerTurn().catch(reportError);
+    }
+    return;
+  }
+
+  const round = currentRound(state.game);
+  if (state.roundPhase !== 'turn' || !round?.turnDeadlineAt) return;
+  const remaining = Math.max(0, round.turnDeadlineAt - now);
+  $('turn-progress').max = guessTimeLimitSeconds(round);
+  $('turn-progress').value = Math.ceil(remaining / 1000);
+  $('turn-countdown').textContent = `${Math.ceil(remaining / 1000)}s`;
+  if (remaining === 0) {
+    stopRoundClock();
+    expireTurn();
+  }
+}
+
+function startRoundClock() {
+  stopRoundClock();
+  updateRoundClock();
+  state.turnTimerInterval = setInterval(updateRoundClock, 250);
+}
+
+function startTurnClock({ resume = false } = {}) {
+  const round = currentRound(state.game);
+  if (!round || !currentTurn(state.game)) return finishRound();
+  stopVoiceRecognition();
+  state.roundPhase = 'turn';
+  state.listeningDeadlineAt = null;
+  round.phase = 'turn';
+  round.listenDeadlineAt = null;
+  round.turnDeadlineAt = resume && round.turnDeadlineAt > Date.now()
+    ? round.turnDeadlineAt
+    : Date.now() + guessTimeLimitSeconds(round) * 1000;
+  $('guess-text').value = '';
+  saveGame();
+  renderGame();
+  startRoundClock();
+}
+
+function startListeningPhase(deadlineAt = Date.now() + LISTEN_DURATION_MS) {
+  const round = currentRound(state.game);
+  if (!round) return;
+  state.roundPhase = 'listening';
+  state.listeningDeadlineAt = deadlineAt;
+  round.phase = 'listening';
+  round.listenDeadlineAt = deadlineAt;
+  round.turnDeadlineAt = null;
+  saveGame();
+  renderGame();
+  startRoundClock();
+}
+
+async function beginPlayerTurn() {
+  try {
+    await pauseCurrent();
+  } catch (err) {
+    reportError(err);
+  }
+  startTurnClock();
+}
+
+function showGuessFeedback(message, correct = null) {
+  const feedback = $('guess-feedback');
+  feedback.textContent = message;
+  feedback.classList.toggle('correct', correct === true);
+  feedback.classList.toggle('incorrect', correct === false);
+}
+
+function guessIsCorrect(trackId, category, guess) {
+  const track = state.tracks.get(trackId);
+  if (!track) return false;
+  if (category === 'artist') {
+    return guessMatches(guess, [...track.artists, track.artists.join(', ')]);
+  }
+  if (category === 'title') {
+    return guessMatches(guess, [track.title, displayTitle(track)]);
+  }
+  if (category === 'year') {
+    const year = yearFor(trackId)?.year;
+    return year != null && guessMatches(guess, [String(year), formatYear(year)]);
+  }
+  return false;
+}
+
+function finishRound() {
+  stopRoundClock();
+  stopVoiceRecognition();
+  const round = currentRound(state.game);
+  if (!round) return;
+  if (state.advanceTimeout) clearTimeout(state.advanceTimeout);
+  state.advanceTimeout = null;
+  round.currentTurnId = null;
+  round.turnDeadlineAt = null;
+  round.listenDeadlineAt = null;
+  round.phase = 'reveal';
+  state.roundPhase = 'reveal';
+  state.listeningDeadlineAt = null;
+  revealAllAnswers();
+  saveGame();
+  renderGame();
+
+  const rows = standings(state.game);
+  const leader = rows[0];
+  if (leader && leader.total >= state.game.targetScore) {
+    state.roundPhase = 'game-over';
+    round.phase = 'game-over';
+    const winners = rows.filter((row) => row.total === leader.total).map((row) => row.contestant.name);
+    saveGame();
+    renderGame();
+    setStatus(`${winners.length > 1 ? 'Tie' : 'Winner'}: ${winners.join(' and ')} with ${leader.total} points.`);
+    return;
+  }
+
+  showGuessFeedback(`Next song in ${ROUND_REVEAL_MS / 1000} seconds.`);
+  setStatus(`Round complete. The next song starts in ${ROUND_REVEAL_MS / 1000} seconds.`);
+  state.advanceTimeout = setTimeout(() => {
+    nextSong().catch(reportError);
+  }, ROUND_REVEAL_MS);
+}
+
+function advanceAfterTurn() {
+  const round = currentRound(state.game);
+  if (!round) return;
+  if (scoredCategories(round, state.game.contestants).length === CATEGORIES.length || !currentTurn(state.game)) {
+    finishRound();
+  } else {
+    startTurnClock();
+  }
+}
+
+function expireTurn() {
+  resolvePassTurn(`Time is up for`);
+}
+
+function resolvePassTurn(reason) {
+  const roundIndex = state.game.rounds.length - 1;
+  const contestant = currentTurn(state.game);
+  if (!contestant) return finishRound();
+  stopVoiceRecognition();
+  passTurn(state.game, roundIndex, contestant.id);
+  saveGame();
+  renderScores();
+  showGuessFeedback(`${reason} ${contestant.name}. No answer was revealed.`, false);
+  advanceAfterTurn();
+}
+
+function submitGuess(event) {
+  event.preventDefault();
+  if (state.roundPhase !== 'turn') return;
+  const roundIndex = state.game.rounds.length - 1;
+  const contestant = currentTurn(state.game);
+  const round = currentRound(state.game);
+  const category = $('guess-category').value;
+  const guess = $('guess-text').value.trim();
+  if (!contestant || !round || !category || !guess) return;
+  if (round.turnDeadlineAt && round.turnDeadlineAt <= Date.now()) {
+    expireTurn();
+    return;
+  }
+  stopVoiceRecognition();
+  const isCorrect = guessIsCorrect(round.trackId, category, guess);
+  resolveGuess(state.game, roundIndex, contestant.id, category, isCorrect);
+  if (isCorrect) {
+    state.revealedAnswers[category] = true;
+  }
+  saveGame();
+  renderAnswer();
+  renderHistory();
+  renderScores();
+  showGuessFeedback(
+    isCorrect
+      ? `Correct — ${contestant.name} earns 1 point.`
+      : `Not quite, ${contestant.name}. The answer stays hidden.`,
+    isCorrect,
+  );
+  advanceAfterTurn();
+}
+
+function speechRecognitionAvailable() {
+  return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+}
+
+function startVoiceGuess() {
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) {
+    throw new Error('Voice recognition is not available in this browser. Type your guess instead.');
+  }
+  if (state.recognition) return;
+  const recognition = new Recognition();
+  recognition.lang = 'en-US';
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+  state.recognition = recognition;
+  $('speak-guess').disabled = true;
+  setStatus('Listening for your guess…');
+  recognition.onresult = (event) => {
+    if (state.roundPhase !== 'turn' || !currentTurn(state.game)) return;
+    const transcript = event.results?.[0]?.[0]?.transcript?.trim();
+    if (transcript) {
+      $('guess-text').value = transcript;
+      setStatus('Voice transcript ready. Review it, then submit your guess.');
+    }
+  };
+  recognition.onerror = (event) => {
+    setStatus(`Voice recognition failed (${event.error}). Type your guess instead.`, true);
+  };
+  recognition.onend = () => {
+    if (state.recognition === recognition) state.recognition = null;
+    renderGuessControls();
+  };
+  try {
+    recognition.start();
+  } catch (err) {
+    state.recognition = null;
+    renderGuessControls();
+    throw err;
+  }
 }
 
 function renderScoreboard() {
@@ -553,19 +1031,43 @@ function showScreen(name) {
 }
 
 async function nextSong() {
+  clearAutomationTimers();
+  state.roundPhase = 'idle';
   spotify().activate();
   const trackIds = [...state.tracks.keys()];
   const trackId = nextRound(state.game, trackIds);
   if (!trackId) throw new Error('The playlist is empty');
   state.revealedAnswers = { artist: false, title: false, year: false };
+  $('guess-feedback').textContent = '';
+  $('guess-feedback').className = 'guess-feedback';
+  if (state.game.mode === 'im-steve') {
+    const round = currentRound(state.game);
+    round.phase = 'manual';
+    round.listenDeadlineAt = null;
+    state.roundPhase = 'manual';
+    saveGame();
+    renderGame();
+    prefetchYear(trackId);
+    if (state.game.deck[0]) prefetchYear(state.game.deck[0]);
+    await playCurrent();
+    setStatus(state.spotifyApiMode === 'mock'
+      ? 'Mock song selected (silent). Use the scoring controls to judge each guess.'
+      : 'Song playing. Use the scoring controls to judge each guess.');
+    return;
+  }
   saveGame();
   renderGame();
   prefetchYear(trackId);
   if (state.game.deck[0]) prefetchYear(state.game.deck[0]);
   await playCurrent();
+  startListeningPhase();
+  setStatus(state.spotifyApiMode === 'mock'
+    ? `Mock round (silent playback). The first turn follows in ${LISTEN_DURATION_MS / 1000} seconds.`
+    : `Listen to the song for ${LISTEN_DURATION_MS / 1000} seconds. The first turn follows.`);
 }
 
 async function enterGame({ fresh }) {
+  clearAutomationTimers();
   const playlistId = parsePlaylistId(state.playlistInput);
   if (fresh) {
     const targetScore = Number($('target-score').value);
@@ -575,8 +1077,11 @@ async function enterGame({ fresh }) {
     if (state.game.rounds.length && !confirm('Start a new game? Current scores will be cleared.')) return;
     resetScores(state.game);
     state.game.targetScore = state.targetScore;
+    state.game.mode = state.selectedMode;
   } else {
     state.targetScore = state.game.targetScore;
+    state.selectedMode = state.game.mode;
+    localStorage.setItem(KEYS.mode, state.selectedMode);
     localStorage.setItem(KEYS.targetScore, String(state.targetScore));
   }
   state.game.playlistId = playlistId;
@@ -591,9 +1096,25 @@ async function enterGame({ fresh }) {
     await nextSong();
   } else {
     state.revealedAnswers = { artist: false, title: false, year: false };
-    renderGame();
-    prefetchYear(currentRound(state.game).trackId);
-    setStatus('Game resumed — press Play to continue the current song.');
+    $('guess-feedback').textContent = '';
+    const round = currentRound(state.game);
+    prefetchYear(round.trackId);
+    if (state.game.mode === 'im-steve') {
+      state.roundPhase = 'manual';
+      renderGame();
+      setStatus('Game resumed — press Play to continue the current song.');
+    } else if (round.phase === 'listening') {
+      const deadlineAt = round.listenDeadlineAt > Date.now() ? round.listenDeadlineAt : Date.now();
+      startListeningPhase(deadlineAt);
+      setStatus('Game resumed during the listening clip.');
+    } else if (['reveal', 'game-over'].includes(round.phase)
+      || !currentTurn(state.game)
+      || scoredCategories(round, state.game.contestants).length === CATEGORIES.length) {
+      finishRound();
+    } else {
+      startTurnClock({ resume: true });
+      setStatus(`Game resumed — ${currentTurn(state.game)?.name}’s turn (${guessTimeLimitSeconds(round)}-second limit).`);
+    }
   }
 }
 
@@ -627,8 +1148,17 @@ window.addEventListener('message', (event) => {
   if (event.data.type === 'error') setStatus(`Spotify player error: ${event.data.message}`, true);
 });
 
+window.addEventListener('storage', (event) => {
+  if (event.key === KEYS.spotifyApiMode) {
+    setSpotifyApiMode(event.newValue === 'live' ? 'live' : 'mock', { persist: false });
+  }
+});
+
+on('spotify-api-mode', 'change', () => setSpotifyApiMode($('spotify-api-mode').value));
+
 on('spotify-form', 'submit', async (e) => {
   e.preventDefault();
+  if (state.spotifyApiMode !== 'live') throw new Error('Select Live Spotify API mode before logging in.');
   const clientId = $('client-id').value.trim();
   if (!clientId) throw new Error('Enter your Spotify app Client ID first');
   state.clientId = clientId;
@@ -648,6 +1178,10 @@ on('playlist-form', 'submit', async (e) => {
   e.preventDefault();
   state.playlistInput = $('playlist').value.trim() || DEFAULT_PLAYLIST_URL;
   localStorage.setItem(KEYS.playlist, state.playlistInput);
+  if (state.spotifyApiMode === 'mock') {
+    await loadPlaylist();
+    return;
+  }
   if (!isLoggedIn()) throw new Error('Log in with Spotify first');
   await loadPlaylist();
 });
@@ -676,6 +1210,8 @@ on('target-score', 'change', () => {
 
 on('start', 'click', () => enterGame({ fresh: true }));
 on('resume', 'click', () => enterGame({ fresh: false }));
+on('mode-no-steve', 'click', () => selectMode('no-steve'));
+on('mode-im-steve', 'click', () => selectMode('im-steve'));
 on('open-spotify-player', 'click', () => openEmbeddedPlayer());
 on('enable-browser-player', 'click', async () => {
   if (spotify().deviceId) {
@@ -715,6 +1251,17 @@ on('play-pause', 'click', async () => {
   if (!deviceId) return playCurrent();
   if (!(await spotify().togglePlay(deviceId, track.uri))) await playCurrent();
 });
+on('guess-form', 'submit', (e) => submitGuess(e));
+on('speak-guess', 'click', () => startVoiceGuess());
+on('pass-guess', 'click', () => {
+  const round = currentRound(state.game);
+  if (state.roundPhase !== 'turn' || !round) return;
+  if (round.turnDeadlineAt && round.turnDeadlineAt <= Date.now()) {
+    expireTurn();
+    return;
+  }
+  resolvePassTurn('Pass from');
+});
 on('replay', 'click', () => {
   spotify().activate();
   const deviceId = $('device').value;
@@ -740,7 +1287,7 @@ on('wrong-reveal', 'click', () => {
   renderAnswer();
   renderHistory();
 });
-on('next', 'click', () => nextSong());
+on('next', 'click', () => state.game.mode === 'no-steve' ? finishRound() : nextSong());
 on('refresh-devices', 'click', () => refreshDevices());
 on('device', 'change', async () => {
   const selectedDevice = $('device').value;
@@ -779,6 +1326,7 @@ on('answer-year', 'change', () => {
 });
 on('answer-year', 'blur', () => renderAnswer());
 on('back-to-setup', 'click', async () => {
+  clearAutomationTimers();
   const deviceId = $('device').value;
   if (deviceId === EMBEDDED_DEVICE) {
     if (embeddedPlayerIsOpen() && embeddedPlayerReady) postEmbeddedMessage('pause');
@@ -797,7 +1345,8 @@ on('reset-scores', 'click', () => {
 
 document.addEventListener('keydown', (e) => {
   if ($('game').hidden || e.target.closest('input, select, textarea, button') || e.ctrlKey || e.metaKey || e.altKey) return;
-  const actions = { ' ': 'play-pause', r: 'wrong-reveal', n: 'next' };
+  const actions = { ' ': 'play-pause', n: 'next' };
+  if (state.game.mode === 'im-steve') actions.r = 'wrong-reveal';
   const id = actions[e.key.toLowerCase()];
   if (id) {
     e.preventDefault();
@@ -809,26 +1358,33 @@ document.addEventListener('keydown', (e) => {
 
 (async function init() {
   showScreen('setup');
-  $('setup-settings').open = !state.clientId || !isLoggedIn();
+  $('speak-guess').hidden = !speechRecognitionAvailable();
+  $('setup-settings').open = state.spotifyApiMode === 'live' && (!state.clientId || !isLoggedIn());
   renderSetup();
   try {
-    if (state.clientId && (await handleRedirect(state.clientId))) setStatus('Connected to Spotify ✓');
-    renderSetup();
-    const playlistId = parsePlaylistId(state.playlistInput);
-    const cache = loadJson(KEYS.playlistCache, null);
-    if (
-      playlistId &&
-      cache?.playlistId === playlistId &&
-      Array.isArray(cache.tracks) &&
-      cache.tracks.every((track) => track && typeof track.id === 'string' && typeof track.uri === 'string')
-    ) {
-      state.playlistName = typeof cache.name === 'string' ? cache.name : null;
-      state.tracks = new Map(cache.tracks.map((track) => [track.id, track]));
-      if (state.clientId && isLoggedIn()) $('setup-settings').open = false;
-      setStatus(`Playlist ready from cache: ${state.tracks.size.toLocaleString()} songs`);
+    if (state.spotifyApiMode === 'mock') {
+      loadMockPlaylist();
+    } else {
+      if (state.clientId && (await handleRedirect(state.clientId))) setStatus('Connected to Spotify ✓');
       renderSetup();
-    } else if (state.clientId && isLoggedIn()) {
-      await loadPlaylist();
+      const playlistId = parsePlaylistId(state.playlistInput);
+      const cache = loadJson(KEYS.playlistCache, null);
+      if (
+        playlistId &&
+        cache?.playlistId === playlistId &&
+        Array.isArray(cache.tracks) &&
+        cache.tracks.every((track) => track && typeof track.id === 'string' && typeof track.uri === 'string')
+      ) {
+        state.playlistName = typeof cache.name === 'string' ? cache.name : null;
+        state.tracks = new Map(cache.tracks.map((track) => [track.id, track]));
+        if (state.clientId && isLoggedIn()) $('setup-settings').open = false;
+        setStatus(`Playlist ready from cache: ${state.tracks.size.toLocaleString()} songs`);
+        renderSetup();
+      } else {
+        setStatus(isLoggedIn()
+          ? 'Live Spotify selected. Click Load playlist to make an API request.'
+          : 'Live Spotify selected. Log in and load a playlist only when ready.');
+      }
     }
   } catch (err) {
     reportError(err);

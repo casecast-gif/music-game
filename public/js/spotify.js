@@ -6,7 +6,6 @@ const TOKEN_URL = 'https://accounts.spotify.com/api/token';
 const API = 'https://api.spotify.com/v1';
 const SDK_URL = 'https://sdk.scdn.co/spotify-player.js';
 const PLAYLIST_PAGE_SIZE = 50;
-const PLAYLIST_PAGE_CONCURRENCY = 2;
 const DEVICE_POLL_ATTEMPTS = 6;
 const PLAYBACK_POLL_ATTEMPTS = 8;
 const PLAYBACK_POLL_INTERVAL_MS = 300;
@@ -28,6 +27,7 @@ export const SCOPES = [
 const TOKEN_KEY = 'musicGame.spotifyToken';
 const VERIFIER_KEY = 'musicGame.pkceVerifier';
 const STATE_KEY = 'musicGame.pkceState';
+const QUOTA_COOLDOWN_KEY = 'musicGame.spotifyQuotaCooldownUntil';
 
 /** Converts one playlist item from `/playlists/{id}/items` into a flat track. */
 export function normalizePlaylistItem(entry) {
@@ -147,6 +147,29 @@ export function logout() {
 
 let refreshPromise = null;
 
+function assertQuotaAvailable() {
+  const storage = globalThis.localStorage;
+  const stored = storage?.getItem(QUOTA_COOLDOWN_KEY);
+  if (!stored) return;
+  if (stored === 'blocked') {
+    throw Object.assign(new Error('Spotify has reported QUOTA_EXCEEDED. API requests are blocked in this browser until the cooldown is known to have expired.'), {
+      status: 429,
+      reason: 'QUOTA_EXCEEDED',
+    });
+  }
+  const until = Number(stored);
+  if (!Number.isFinite(until) || until <= Date.now()) {
+    storage.removeItem(QUOTA_COOLDOWN_KEY);
+    return;
+  }
+  const seconds = Math.ceil((until - Date.now()) / 1000);
+  throw Object.assign(new Error(`Spotify quota cooldown is active for about ${seconds.toLocaleString()} more seconds. No API request was sent.`), {
+    status: 429,
+    reason: 'QUOTA_EXCEEDED',
+    retryAfter: seconds,
+  });
+}
+
 export async function getAccessToken(clientId) {
   const token = loadToken();
   if (!token) throw new Error('Not logged in to Spotify');
@@ -171,6 +194,7 @@ export class SpotifyClient {
   }
 
   async api(path, { method = 'GET', body, query } = {}) {
+    assertQuotaAvailable();
     const token = await getAccessToken(this.clientId);
     const url = new URL(path.startsWith('http') ? path : `${API}${path}`);
     if (query) for (const [k, v] of Object.entries(query)) if (v != null) url.searchParams.set(k, v);
@@ -186,6 +210,7 @@ export class SpotifyClient {
       error.status = res.status;
       const retryAfter = res.headers.get('Retry-After');
       error.retryAfter = retryAfter === null ? null : Number(retryAfter);
+      error.reason = data?.error?.reason ?? null;
       return error;
     };
     let data = null;
@@ -199,7 +224,19 @@ export class SpotifyClient {
       }
     }
     if (!res.ok) {
-      throw makeError(data?.error?.message || `Spotify API error ${res.status}`);
+      const error = makeError(data?.error?.message || `Spotify API error ${res.status}`);
+      if (error.status === 429 && error.reason === 'QUOTA_EXCEEDED') {
+        const storage = globalThis.localStorage;
+        if (storage) {
+          storage.setItem(
+            QUOTA_COOLDOWN_KEY,
+            Number.isFinite(error.retryAfter) && error.retryAfter >= 0
+              ? String(Date.now() + error.retryAfter * 1000)
+              : 'blocked',
+          );
+        }
+      }
+      throw error;
     }
     return data;
   }
@@ -217,7 +254,7 @@ export class SpotifyClient {
     }
   }
 
-  /** Loads playlist pages in small concurrent batches to reduce startup time. */
+  /** Loads playlist pages sequentially to avoid request bursts in development mode. */
   async getPlaylistTracks(playlistId, { onProgress = () => {} } = {}) {
     const tracks = [];
     const fetchPage = async (offset) => {
@@ -228,10 +265,10 @@ export class SpotifyClient {
             query: { limit: PLAYLIST_PAGE_SIZE, offset, additional_types: 'track' },
           });
         } catch (err) {
-          if (err.status !== 429 || attempt >= 3) throw err;
+          if (err.status !== 429 || err.reason === 'QUOTA_EXCEEDED' || attempt >= 3) throw err;
           const delay = Number.isFinite(err.retryAfter)
             ? Math.max(0, err.retryAfter * 1000)
-            : Math.min(30000, 1000 * (2 ** attempt));
+            : Math.min(30000, Math.round(1000 * (2 ** attempt) * (0.8 + Math.random() * 0.4)));
           await new Promise((resolve) => setTimeout(resolve, delay));
           attempt += 1;
         }
@@ -264,11 +301,10 @@ export class SpotifyClient {
 
     const offsets = [];
     for (let offset = PLAYLIST_PAGE_SIZE; offset < total; offset += PLAYLIST_PAGE_SIZE) offsets.push(offset);
-    for (let index = 0; index < offsets.length; index += PLAYLIST_PAGE_CONCURRENCY) {
-      const batch = offsets.slice(index, index + PLAYLIST_PAGE_CONCURRENCY);
-      const pages = await Promise.all(batch.map(fetchPage));
-      pages.forEach(append);
-      loaded += pages.reduce((count, page) => count + (page?.items?.length ?? 0), 0);
+    for (const offset of offsets) {
+      const page = await fetchPage(offset);
+      append(page);
+      loaded += page?.items?.length ?? 0;
       onProgress(loaded, total);
     }
     return tracks;

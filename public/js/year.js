@@ -39,6 +39,11 @@ export function normalize(text) {
     .replace(/[^a-z0-9]+/g, '');
 }
 
+export function guessMatches(guess, acceptedAnswers) {
+  const normalizedGuess = normalize(guess);
+  return Boolean(normalizedGuess) && acceptedAnswers.some((answer) => normalize(answer) === normalizedGuess);
+}
+
 function earliestYear(recordings) {
   const years = recordings.map((r) => yearFromDate(r['first-release-date'])).filter((y) => y !== null);
   return years.length ? Math.min(...years) : null;

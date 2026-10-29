@@ -1,14 +1,14 @@
 # music-game
 
-A host/controller screen for an in-person "guess the song" party game, powered by a Spotify playlist.
+A self-running screen for an in-person "guess the song" party game, powered by a Spotify playlist.
 
-The host runs this page on a laptop hooked up to speakers (or controls any Spotify device in the room). For each round it:
+**No Steve** runs on the room's big screen with a Spotify speaker; players enter guesses on the shared screen, so no host is needed. **I'm Steve** preserves the host-controlled reveal and scoring flow. For each No Steve round the game:
 
 1. randomly picks a song from the playlist (no repeats until every song has been played) and plays it,
-2. reveals the **artist**, **song title** and **year of original release** one at a time as players guess,
-3. lets you tick off who got each of those three right — individual players and/or teams,
+2. plays a 15-second listening clip, then pauses playback,
+3. gives each player one timed chance to guess an unanswered **artist**, **song title** or **year of original release**,
 4. keeps a running scoreboard (per-category tallies and total out of 3 points per song), then
-5. moves on to the next song.
+5. reveals any remaining answers and automatically moves on to the next song.
 
 By default the game is tied to this playlist:
 <https://open.spotify.com/playlist/551LDjYYp8i22IV6GGzjeq> (change it in `public/js/config.js`, or paste a different link on the setup screen).
@@ -16,10 +16,11 @@ By default the game is tied to this playlist:
 ## Requirements
 
 - Node.js 18+ (only used to serve the static files — there are no npm dependencies)
-- A **Spotify Premium** account (required by Spotify for in-browser playback / playback control)
-- A Spotify developer app (free)
+- A **Spotify Premium** account and Spotify developer app (only required for Live Spotify mode)
 
 ## One-time Spotify setup
+
+The app starts in **Mock data** mode and makes no Spotify API requests. Use the steps below only when you want to test real Spotify integration.
 
 1. Go to <https://developer.spotify.com/dashboard> and create an app.
 2. Tick **Web API** and **Web Playback SDK**.
@@ -39,28 +40,32 @@ npm start          # serves http://127.0.0.1:8888/
 
 Open <http://127.0.0.1:8888/>, then:
 
-1. Use **Settings & troubleshooting** and click **Log in with Spotify**. Each browser has separate saved settings; the configured Client ID is prefilled in each one.
-2. The playlist loads automatically. It is cached in the browser so later visits can start quickly; use Settings to reload it or choose another playlist.
-3. Keep **No Steve** selected (I'm Steve, Jeopardy Styleez, and Name That Tune are coming soon), choose the target score (default 15), and add players. The target is the combined Artist, Song, and Year points; it remains visible on the scoreboard, but does not stop play.
-4. To make a team, enter a team name plus its members (comma separated); leave members empty for a solo player. Press **Start game** when ready.
+1. The default **Mock data** mode loads bundled sample songs and simulates silent playback without calling Spotify or MusicBrainz. Use it for game development without consuming API quota.
+2. To test Spotify, open **Settings & troubleshooting**, select **Live Spotify API**, then click **Log in with Spotify**. Each browser has separate saved settings; the configured Client ID is prefilled in each one.
+3. After login, click **Load playlist** to fetch the selected playlist. It is cached in that browser so later visits can start quickly. Playlist loading is never automatic in Live mode.
+4. Select **No Steve** for automatic play or **I'm Steve** for the host-controlled version. Choose the target score (default 15). The first No Steve guess gets 60 seconds; each later player gets 20 seconds. No Steve ends after the current song when a player or team reaches the target; I'm Steve can continue past it.
+5. Add players. To make a team, enter a team name plus its members (comma separated); leave members empty for a solo player. Press **Start game** when ready.
+
+The API mode is shared between tabs in the same browser profile. A Spotify `QUOTA_EXCEEDED` response is remembered in that profile; subsequent API calls are blocked until Spotify's `Retry-After` period expires. Mock mode remains available during that cooldown.
 
 ### During the game
 
 | Control | Shortcut | What it does |
 | --- | --- | --- |
-| ⏯ Play / Pause game song | `Space` | Start the current game song if another song is active; pause or resume it when it is already playing |
+| ⏯ Play / Pause game song | `Space` | Pause or resume playback |
 | ⏮ Restart song | | Play the current song from the beginning |
-| Reveal artist / title / year | | Reveal each answer separately; album art appears after all three are revealed |
-| Wrong — reveal all | `R` | Reveal all answers and album art |
-| ⏭ Next song | `N` | Pick and play the next random song |
+| Reveal artist / title / year | | I'm Steve only: reveal each answer separately |
+| Wrong — reveal all | `R` | I'm Steve only: reveal all answers and album art |
+| Next song | `N` | Move on; No Steve reveals answers first |
 
-- **Score this song**: toggle Artist / Song / Year for each player or team (each worth 1 point). The scoreboard shows each total against the selected goal.
+- **No Steve timed turns**: after the listening clip, the active player or team chooses one unanswered category and submits one guess before the countdown ends. The first player gets 60 seconds; each subsequent player gets 20 seconds. Correct guesses earn 1 point and reveal that answer; wrong guesses, passes, and timeouts do not reveal it. The next player then gets a turn. Turn order rotates between songs. The round ends when everyone has had a turn or all three categories have been claimed; remaining answers are revealed for six seconds before the next song.
+- **No Steve voice input**: when supported by the browser, press **Speak guess** and review the transcript before submitting. Recognition can mishear names and may require an online service; typed guesses are always available. Voice recognition is optional and is never used to decide whether an answer is right.
+- **I'm Steve scoring**: the highlighted player or team has the turn. The host marks each unanswered category correct to award its point; the same player/team keeps the turn and can claim another. **Wrong / Pass** advances to the next player/team. The host controls answer reveals and when to move on.
 - **Play on**: choose a Spotify app/speaker (press **Refresh devices** to update; the active device is labeled). The game transfers playback to the selected device when needed, then confirms the track and device state. If Spotify accepts the command but keeps another track playing, use the active device or try the browser player. To use this tab as the speaker, choose **Enable playback in this browser** under Settings to prepare it, then use **Play** in the game; Spotify requires Premium and browser protected-audio support.
 - **Spotify preview player**: the Embed implementation is retained for the future **Name That Tune** mode, where short previews can be useful. It is disabled for **No Steve**, which needs full-song playback.
 - **Year** shows the *original* release year: Spotify often reports a remaster or compilation date, so the year is
   looked up on [MusicBrainz](https://musicbrainz.org) (earliest release of that recording) and falls back to Spotify's
-  album year. 1977 is displayed as **Star Wars** and 2001 as **Towers**. If the year is still wrong you can type the
-  correct year in — your correction is remembered.
+  album year. The Year category is unavailable until an answer is ready. 1977 is displayed as **Star Wars** and 2001 as **Towers**.
 - Scores, players and the shuffle are saved in the browser, so a refresh doesn't lose the game (**Resume game**).
 
 ## Development
@@ -73,4 +78,5 @@ npm test           # unit tests (node --test)
 - `public/js/spotify.js` — Spotify PKCE login, playlist loading, Web Playback SDK / Connect playback
 - `public/js/year.js` — original-release-year lookup via MusicBrainz
 - `public/js/app.js` — UI wiring
+
 - `server.js` — tiny static file server

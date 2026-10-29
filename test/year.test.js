@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   cleanTitle,
   formatYear,
+  guessMatches,
   normalize,
   resolveOriginalYear,
   yearFromDate,
@@ -32,6 +33,13 @@ test('cleanTitle strips remaster / version suffixes', () => {
   assert.equal(cleanTitle('(I Can\'t Get No) Satisfaction'), "(I Can't Get No) Satisfaction");
   assert.equal(normalize('The Beatles'), normalize('beatles'));
   assert.equal(normalize('Simon & Garfunkel'), normalize('Simon and Garfunkel'));
+});
+
+test('guessMatches accepts normalized exact matches but not partial matches', () => {
+  assert.equal(guessMatches('Beyonce!', ['Beyoncé']), true);
+  assert.equal(guessMatches('the who', ['Who']), true);
+  assert.equal(guessMatches('Bohemian', ['Bohemian Rhapsody']), false);
+  assert.equal(guessMatches(' ', ['Answer']), false);
 });
 
 test('ISRC response yields earliest first-release-date', () => {

@@ -17,10 +17,11 @@
       <section id="setup" class="panel">
         <div class="game-modes" role="group" aria-label="Game mode">
           <button id="mode-no-steve" type="button" class="primary" aria-pressed="true">No Steve</button>
-          <button id="mode-im-steve" type="button" disabled title="Coming soon">I'm Steve</button>
+          <button id="mode-im-steve" type="button" aria-pressed="false">I'm Steve</button>
           <button type="button" disabled title="Coming soon">Jeopardy Styleez</button>
           <button type="button" disabled title="Coming soon">Name That Tune</button>
         </div>
+        <p id="mode-description" class="hint"></p>
 
         <div class="connection-summary" aria-live="polite">
           <span>Spotify <strong id="spotify-state">Not connected</strong></span>
@@ -30,8 +31,9 @@
         <div class="target-score-setting">
           <label for="target-score">Play to (total points)</label>
           <input id="target-score" type="number" min="1" step="1" value="15" />
-          <span class="hint">Points combine correct Artist, Song, and Year guesses. Play can continue past the target.</span>
+          <span id="target-score-hint" class="hint"></span>
         </div>
+        <p id="turn-duration-setting" class="hint">No Steve: the first guess gets 60 seconds; each later player gets 20 seconds.</p>
 
         <h2>Players &amp; teams</h2>
         <form id="contestant-form" class="row">
@@ -55,6 +57,16 @@
         <details id="setup-settings" class="settings">
           <summary>⚙ Settings &amp; troubleshooting</summary>
           <div class="settings-content">
+            <h3>Spotify API mode</h3>
+            <label>
+              API mode
+              <select id="spotify-api-mode">
+                <option value="mock">Mock data (no Spotify requests)</option>
+                <option value="live">Live Spotify API</option>
+              </select>
+            </label>
+            <p id="spotify-mode-help" class="hint"></p>
+
             <h3>Spotify connection</h3>
             <form id="spotify-form" class="row">
               <label>
@@ -64,7 +76,7 @@
               <button id="login" type="submit">Log in with Spotify</button>
               <button id="logout" type="button" class="secondary" hidden>Log out</button>
             </form>
-            <p class="hint">
+            <p id="redirect-uri-hint" class="hint">
               Redirect URI to register in your Spotify app: <code id="redirect-uri"></code>
             </p>
 
@@ -113,11 +125,11 @@
             <div class="row controls">
               <button id="play-pause" type="button">⏯ Play / Pause game song</button>
               <button id="replay" type="button" class="secondary">⏮ Restart song</button>
-              <button id="reveal-artist" type="button">Reveal artist</button>
-              <button id="reveal-title" type="button">Reveal title</button>
-              <button id="reveal-year" type="button">Reveal year</button>
-              <button id="wrong-reveal" type="button" class="danger">Wrong — reveal all</button>
-              <button id="next" type="button" class="primary">⏭ Next song</button>
+              <button id="reveal-artist" type="button" hidden>Reveal artist</button>
+              <button id="reveal-title" type="button" hidden>Reveal title</button>
+              <button id="reveal-year" type="button" hidden>Reveal year</button>
+              <button id="wrong-reveal" type="button" hidden>Wrong — reveal all</button>
+              <button id="next" type="button" class="secondary">Skip song</button>
             </div>
             <div class="row">
               <label class="inline">
@@ -127,12 +139,31 @@
               <button id="refresh-devices" type="button" class="secondary small">↻ Refresh devices</button>
               <button id="open-spotify-player" type="button" class="secondary small" disabled title="Reserved for Name That Tune mode">Spotify preview (Name That Tune, later)</button>
             </div>
-            <p class="hint">Full-song playback uses a Spotify device or the browser player. The Spotify preview player is reserved for Name That Tune mode.</p>
+            <p id="playback-hint" class="hint">Full-song playback uses a Spotify device or the browser player. The Spotify preview player is reserved for Name That Tune mode.</p>
 
             <h3>Score this song</h3>
+            <p id="current-turn" class="turn-indicator" aria-live="polite"></p>
+            <section id="auto-turn" class="auto-turn" hidden>
+              <div class="turn-clock">
+                <progress id="turn-progress" value="0" max="30"></progress>
+                <span id="turn-countdown" aria-live="polite"></span>
+              </div>
+              <form id="guess-form" class="guess-form">
+                <label for="guess-category">Choose an answer</label>
+                <select id="guess-category" required></select>
+                <label for="guess-text">Your guess</label>
+                <input id="guess-text" autocomplete="off" placeholder="Type or use voice" required />
+                <div class="guess-actions">
+                  <button id="speak-guess" type="button" class="secondary">🎙 Speak guess</button>
+                  <button id="pass-guess" type="button" class="secondary">Pass</button>
+                  <button id="submit-guess" type="submit" class="primary">Submit guess</button>
+                </div>
+              </form>
+              <p id="guess-feedback" class="guess-feedback" aria-live="polite"></p>
+            </section>
             <table class="score-table">
               <thead>
-                <tr><th>Player / team</th><th>Artist</th><th>Song</th><th>Year</th><th>Pts</th></tr>
+                <tr><th>Player / team</th><th>Artist</th><th>Song</th><th>Year</th><th id="turn-column-heading">Turn</th><th>Pts</th></tr>
               </thead>
               <tbody id="round-scoring"></tbody>
             </table>
