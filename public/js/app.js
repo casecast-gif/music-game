@@ -3,7 +3,9 @@ import {
   CATEGORIES,
   CATEGORY_LABELS,
   DEFAULT_TARGET_SCORE,
+  MANUAL_TURN_SECONDS,
   guessTimeLimitSeconds,
+  manualClockDisplaySeconds,
   addContestant,
   createContestant,
   createGame,
@@ -15,12 +17,12 @@ import {
   parsePlaylistId,
   passTurn,
   removeContestant,
+  resolveManualTurn,
   resolveGuess,
   resetScores,
   roundPoints,
   scoredCategories,
   serializeGame,
-  setAward,
   getAward,
   standings,
 } from './game.js';
@@ -586,8 +588,14 @@ function renderRoundScoring() {
     listening: `Listen to the clip. ${activeContestant?.name ?? 'The first player'} goes first.`,
     turn: activeContestant ? `${activeContestant.name}’s turn — choose one unanswered category.` : 'This song is complete.',
     manual: activeContestant
-      ? `${activeContestant.name}’s turn — mark correct answers or choose Wrong / Pass.`
-      : 'Everyone is out for this song.',
+      ? round?.boardActive
+        ? `${activeContestant.name}’s turn — run the board or choose Wrong / Pass.`
+        : `${activeContestant.name}’s first turn — mark one correct answer or choose Wrong / Pass.`
+      : allCategoriesSolved
+        ? 'All three answers identified.'
+        : answersComplete()
+          ? 'Answers revealed.'
+          : 'No players remain. The remaining answers are revealed.',
     reveal: 'Round complete. The answers are revealed.',
     'game-over': 'Game over.',
     idle: 'The game is ready.',
@@ -613,7 +621,7 @@ function renderRoundScoring() {
       if (isOut) {
         const status = document.createElement('span');
         status.className = 'members contestant-status';
-        status.textContent = 'Turn complete';
+        status.textContent = noSteve ? 'Turn complete' : 'Out this song';
         nameCell.append(status);
       }
       tr.append(nameCell);
@@ -631,12 +639,7 @@ function renderRoundScoring() {
           button.textContent = on ? '✓' : '—';
           button.disabled = !round || !isCurrent || isOut || solvedCategories.includes(cat);
           button.addEventListener('click', () => {
-            setAward(state.game, roundIndex, c.id, cat);
-            state.revealedAnswers[cat] = true;
-            saveGame();
-            renderAnswer();
-            renderHistory();
-            renderScores();
+            completeManualTurn(c.id, cat);
           });
           td.append(button);
         }
@@ -646,18 +649,26 @@ function renderRoundScoring() {
       if (noSteve) {
         turnCell.textContent = isCurrent ? 'Now' : isOut ? 'Done' : 'Waiting';
       } else {
-        const passButton = document.createElement('button');
-        passButton.type = 'button';
-        passButton.className = 'small secondary';
-        passButton.textContent = isOut ? 'Out' : 'Wrong / Pass';
-        passButton.setAttribute('aria-label', `${c.name} guesses wrong or passes`);
-        passButton.disabled = !round || !isCurrent || isOut || allCategoriesSolved;
-        passButton.addEventListener('click', () => {
-          passTurn(state.game, roundIndex, c.id);
-          saveGame();
-          renderScores();
-        });
-        turnCell.append(passButton);
+        if (isOut) {
+          turnCell.textContent = 'Out';
+        } else if (isCurrent) {
+          const passButton = document.createElement('button');
+          passButton.type = 'button';
+          passButton.className = 'small secondary';
+          passButton.textContent = 'Wrong / Pass';
+          passButton.setAttribute('aria-label', `${c.name} guesses wrong or passes`);
+          passButton.disabled = allCategoriesSolved;
+          passButton.addEventListener('click', () => {
+            completeManualTurn(c.id);
+          });
+          turnCell.append(passButton);
+        } else if (round?.attempted?.includes(c.id) && roundPoints(round, c.id) > 0) {
+          turnCell.textContent = round.boardActive ? 'Runner' : 'Board eligible';
+        } else if (round?.attempted?.includes(c.id)) {
+          turnCell.textContent = 'Done';
+        } else {
+          turnCell.textContent = 'Waiting';
+        }
       }
       tr.append(turnCell);
       const pts = document.createElement('td');
@@ -697,6 +708,15 @@ function renderGuessControls() {
     && Boolean(activeContestant)
     && openCategories.some((category) => category !== 'year' || yearReady);
   $('auto-turn').hidden = state.game.mode !== 'no-steve' || !['listening', 'turn'].includes(state.roundPhase);
+  const manualClockActive = state.game.mode === 'im-steve' && Boolean(round?.turnDeadlineAt);
+  $('manual-clock-controls').hidden = state.game.mode !== 'im-steve';
+  $('start-manual-clock').disabled = !activeContestant
+    || state.roundPhase !== 'manual'
+    || manualClockActive;
+  $('manual-clock-display').hidden = !manualClockActive;
+  if (manualClockActive) {
+    $('manual-clock-display').textContent = String(manualClockDisplaySeconds(round.turnDeadlineAt));
+  }
   $('guess-form').hidden = state.roundPhase !== 'turn' || !activeContestant;
   categorySelect.disabled = !canAnswer;
   $('guess-text').disabled = !canAnswer;
@@ -741,6 +761,17 @@ function clearAutomationTimers() {
 
 function updateRoundClock() {
   const now = Date.now();
+  if (state.roundPhase === 'manual') {
+    const round = currentRound(state.game);
+    if (!round?.turnDeadlineAt) return;
+    $('manual-clock-display').textContent = String(manualClockDisplaySeconds(round.turnDeadlineAt, now));
+    if (round.turnDeadlineAt <= now) {
+      stopRoundClock();
+      expireManualTurn();
+    }
+    return;
+  }
+
   if (state.roundPhase === 'listening' && state.listeningDeadlineAt) {
     const remaining = Math.max(0, state.listeningDeadlineAt - now);
     $('turn-progress').max = LISTEN_DURATION_MS / 1000;
@@ -769,6 +800,21 @@ function startRoundClock() {
   stopRoundClock();
   updateRoundClock();
   state.turnTimerInterval = setInterval(updateRoundClock, 250);
+}
+
+function startManualClock({ resume = false } = {}) {
+  const round = currentRound(state.game);
+  if (state.game.mode !== 'im-steve' || !round || !currentTurn(state.game)) return;
+  state.roundPhase = 'manual';
+  round.phase = 'manual';
+  if (resume && round.turnDeadlineAt && round.turnDeadlineAt <= Date.now()) {
+    expireManualTurn();
+    return;
+  }
+  if (!resume || !round.turnDeadlineAt) round.turnDeadlineAt = Date.now() + MANUAL_TURN_SECONDS * 1000;
+  saveGame();
+  renderGame();
+  startRoundClock();
 }
 
 function startTurnClock({ resume = false } = {}) {
@@ -867,6 +913,54 @@ function finishRound() {
   state.advanceTimeout = setTimeout(() => {
     nextSong().catch(reportError);
   }, ROUND_REVEAL_MS);
+}
+
+function finishManualRound() {
+  const round = currentRound(state.game);
+  const allAnswersRevealed = answersComplete();
+  if (!round || (currentTurn(state.game) && !allAnswersRevealed)) return;
+  const allCategoriesSolved = scoredCategories(round, state.game.contestants).length === CATEGORIES.length;
+  if (!allAnswersRevealed) revealAllAnswers();
+  stopRoundClock();
+  round.currentTurnId = null;
+  round.turnDeadlineAt = null;
+  round.phase = 'manual';
+  state.roundPhase = 'manual';
+  saveGame();
+  renderGame();
+  setStatus(allCategoriesSolved
+    ? 'All answers identified. Choose Next song when ready.'
+    : allAnswersRevealed
+      ? 'Answers revealed. Choose Next song when ready.'
+      : 'Everyone is out. Remaining answers are revealed; choose Next song when ready.');
+}
+
+function completeManualTurn(contestantId, category = null, { timedOut = false } = {}) {
+  const roundIndex = state.game.rounds.length - 1;
+  const round = currentRound(state.game);
+  const contestant = state.game.contestants.find((c) => c.id === contestantId);
+  if (!round || !contestant) return;
+  if (!timedOut && round.turnDeadlineAt && round.turnDeadlineAt <= Date.now()) {
+    expireManualTurn();
+    return;
+  }
+  stopRoundClock();
+  resolveManualTurn(state.game, roundIndex, contestantId, category);
+  if (category !== null) state.revealedAnswers[category] = true;
+  saveGame();
+  renderAnswer();
+  renderHistory();
+  renderScores();
+  if (!currentTurn(state.game)) {
+    finishManualRound();
+  } else if (timedOut) {
+    setStatus(`${contestant.name} ran out of time and is out for this song.`);
+  }
+}
+
+function expireManualTurn() {
+  const contestant = currentTurn(state.game);
+  if (contestant) completeManualTurn(contestant.id, null, { timedOut: true });
 }
 
 function advanceAfterTurn() {
@@ -1101,8 +1195,14 @@ async function enterGame({ fresh }) {
     prefetchYear(round.trackId);
     if (state.game.mode === 'im-steve') {
       state.roundPhase = 'manual';
-      renderGame();
-      setStatus('Game resumed — press Play to continue the current song.');
+      if (!currentTurn(state.game)) {
+        finishManualRound();
+      } else if (round.turnDeadlineAt) {
+        startManualClock({ resume: true });
+      } else {
+        renderGame();
+        setStatus('Game resumed — press Play to continue the current song.');
+      }
     } else if (round.phase === 'listening') {
       const deadlineAt = round.listenDeadlineAt > Date.now() ? round.listenDeadlineAt : Date.now();
       startListeningPhase(deadlineAt);
@@ -1212,6 +1312,7 @@ on('start', 'click', () => enterGame({ fresh: true }));
 on('resume', 'click', () => enterGame({ fresh: false }));
 on('mode-no-steve', 'click', () => selectMode('no-steve'));
 on('mode-im-steve', 'click', () => selectMode('im-steve'));
+on('start-manual-clock', 'click', () => startManualClock());
 on('open-spotify-player', 'click', () => openEmbeddedPlayer());
 on('enable-browser-player', 'click', async () => {
   if (spotify().deviceId) {
@@ -1280,12 +1381,14 @@ for (const category of CATEGORIES) {
     state.revealedAnswers[category] = true;
     renderAnswer();
     renderHistory();
+    if (state.game.mode === 'im-steve' && answersComplete()) finishManualRound();
   });
 }
 on('wrong-reveal', 'click', () => {
   revealAllAnswers();
   renderAnswer();
   renderHistory();
+  if (state.game.mode === 'im-steve') finishManualRound();
 });
 on('next', 'click', () => state.game.mode === 'no-steve' ? finishRound() : nextSong());
 on('refresh-devices', 'click', () => refreshDevices());

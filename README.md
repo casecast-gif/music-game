@@ -24,7 +24,9 @@ The app starts in **Mock data** mode and makes no Spotify API requests. Use the 
 
 1. Go to <https://developer.spotify.com/dashboard> and create an app.
 2. Tick **Web API** and **Web Playback SDK**.
-3. Add the redirect URI `http://127.0.0.1:8888/` (Spotify does not accept `localhost`, use `127.0.0.1`).
+3. Add these redirect URIs to the Spotify app:
+   - Local development: `http://127.0.0.1:8888/` (Spotify does not accept `localhost`, use `127.0.0.1`).
+   - Production: `https://casecast-gif.github.io/music-game/`.
 4. The app's public **Client ID** is prefilled. If you use a different Spotify developer app, replace it with that app's Client ID.
 5. Apps in development mode only work for users you add under **User Management**, so add the Spotify account you'll host with.
 
@@ -60,7 +62,7 @@ The API mode is shared between tabs in the same browser profile. A Spotify `QUOT
 
 - **No Steve timed turns**: after the listening clip, the active player or team chooses one unanswered category and submits one guess before the countdown ends. The first player gets 60 seconds; each subsequent player gets 20 seconds. Correct guesses earn 1 point and reveal that answer; wrong guesses, passes, and timeouts do not reveal it. The next player then gets a turn. Turn order rotates between songs. The round ends when everyone has had a turn or all three categories have been claimed; remaining answers are revealed for six seconds before the next song.
 - **No Steve voice input**: when supported by the browser, press **Speak guess** and review the transcript before submitting. Recognition can mishear names and may require an online service; typed guesses are always available. Voice recognition is optional and is never used to decide whether an answer is right.
-- **I'm Steve scoring**: the highlighted player or team has the turn. The host marks each unanswered category correct to award its point; the same player/team keeps the turn and can claim another. **Wrong / Pass** advances to the next player/team. The host controls answer reveals and when to move on.
+- **I'm Steve scoring**: every player or team gets one first attempt at an unanswered category. Correct players become board runners; after everyone has had a first attempt, those runners take turns guessing the remaining answers. A runner keeps going until they miss or pass, then the next successful player gets a turn. The host can press **Put the clock on em** to start a 15-second turn timer with a 10-second on-screen countdown; a timeout counts as Wrong / Pass. The round ends when all answers are identified or no runners remain, and any remaining answers are revealed.
 - **Play on**: choose a Spotify app/speaker (press **Refresh devices** to update; the active device is labeled). The game transfers playback to the selected device when needed, then confirms the track and device state. If Spotify accepts the command but keeps another track playing, use the active device or try the browser player. To use this tab as the speaker, choose **Enable playback in this browser** under Settings to prepare it, then use **Play** in the game; Spotify requires Premium and browser protected-audio support.
 - **Spotify preview player**: the Embed implementation is retained for the future **Name That Tune** mode, where short previews can be useful. It is disabled for **No Steve**, which needs full-song playback.
 - **Year** shows the *original* release year: Spotify often reports a remaster or compilation date, so the year is
@@ -78,5 +80,8 @@ npm test           # unit tests (node --test)
 - `public/js/spotify.js` — Spotify PKCE login, playlist loading, Web Playback SDK / Connect playback
 - `public/js/year.js` — original-release-year lookup via MusicBrainz
 - `public/js/app.js` — UI wiring
-
 - `server.js` — tiny static file server
+
+## Deployment
+
+The production site is <https://casecast-gif.github.io/music-game/>. Each push to `main` runs the tests and deploys `public/` to GitHub Pages when they pass. To enable the first deployment, open the repository's **Settings → Pages** and set **Build and deployment → Source** to **GitHub Actions**. Use **Actions → Test and deploy to GitHub Pages → Run workflow** to publish manually without pushing another commit.

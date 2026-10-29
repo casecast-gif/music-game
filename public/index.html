@@ -143,6 +143,10 @@
 
             <h3>Score this song</h3>
             <p id="current-turn" class="turn-indicator" aria-live="polite"></p>
+            <section id="manual-clock-controls" class="manual-clock-controls" hidden>
+              <button id="start-manual-clock" type="button" class="secondary">Put the clock on em</button>
+              <output id="manual-clock-display" class="manual-clock-display" role="timer" aria-label="Player turn countdown" hidden>10</output>
+            </section>
             <section id="auto-turn" class="auto-turn" hidden>
               <div class="turn-clock">
                 <progress id="turn-progress" value="0" max="30"></progress>

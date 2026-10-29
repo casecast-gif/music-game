@@ -5,6 +5,13 @@ export const CATEGORY_LABELS = { artist: 'Artist', title: 'Song', year: 'Year' }
 export const DEFAULT_TARGET_SCORE = 15;
 export const FIRST_GUESS_SECONDS = 60;
 export const FOLLOWUP_GUESS_SECONDS = 20;
+export const MANUAL_TURN_SECONDS = 15;
+export const MANUAL_DISPLAY_SECONDS = 10;
+
+export function manualClockDisplaySeconds(deadlineAt, now = Date.now()) {
+  const elapsed = MANUAL_TURN_SECONDS * 1000 - (deadlineAt - now);
+  return Math.min(MANUAL_DISPLAY_SECONDS, Math.max(0, Math.ceil((MANUAL_DISPLAY_SECONDS * 1000 - elapsed) / 1000)));
+}
 
 export function guessTimeLimitSeconds(round) {
   return (round?.out?.length ?? 0) === 0 ? FIRST_GUESS_SECONDS : FOLLOWUP_GUESS_SECONDS;
@@ -92,6 +99,7 @@ export function removeContestant(game, contestantId) {
   for (const round of game.rounds) {
     delete round.awards[contestantId];
     round.out = (round.out ?? []).filter((id) => id !== contestantId);
+    round.attempted = (round.attempted ?? []).filter((id) => id !== contestantId);
     if (round.currentTurnId === contestantId) {
       round.currentTurnId = nextActiveContestant(game.contestants, round, removedIndex - 1)?.id ?? null;
     }
@@ -136,6 +144,8 @@ export function nextRound(game, trackIds, rng = Math.random) {
     trackId,
     awards: {},
     out: [],
+    attempted: [],
+    boardActive: false,
     currentTurnId: game.contestants[startingContestantIndex]?.id ?? null,
     turnDeadlineAt: null,
     listenDeadlineAt: null,
@@ -186,6 +196,58 @@ export function passTurn(game, roundIndex, contestantId) {
   round.currentTurnId = nextActiveContestant(game.contestants, round, currentIndex)?.id ?? null;
   round.turnDeadlineAt = null;
   return round.currentTurnId;
+}
+
+/** Advances an I'm Steve turn: everyone gets one try before successful players run the board. */
+export function resolveManualTurn(game, roundIndex, contestantId, category = null) {
+  const round = game.rounds[roundIndex];
+  if (!round) throw new Error(`No round ${roundIndex}`);
+  const contestantIndex = game.contestants.findIndex((c) => c.id === contestantId);
+  if (contestantIndex === -1) throw new Error(`Unknown contestant: ${contestantId}`);
+  if (round.currentTurnId !== contestantId || round.out?.includes(contestantId)) {
+    throw new Error('It is not this contestant’s turn');
+  }
+  if (category !== null) setAward(game, roundIndex, contestantId, category);
+
+  round.attempted ??= [];
+  round.out ??= [];
+  round.boardActive ??= false;
+  if (!round.attempted.includes(contestantId)) round.attempted.push(contestantId);
+  if (category === null) round.out.push(contestantId);
+  round.turnDeadlineAt = null;
+
+  if (scoredCategories(round, game.contestants).length === CATEGORIES.length) {
+    round.currentTurnId = null;
+  } else if (!round.boardActive) {
+    const nextFirstAttempt = nextContestantMatching(
+      game.contestants,
+      contestantIndex,
+      (contestant) => !round.out.includes(contestant.id) && !round.attempted.includes(contestant.id),
+    );
+    if (nextFirstAttempt) {
+      round.currentTurnId = nextFirstAttempt.id;
+    } else {
+      round.boardActive = true;
+      round.currentTurnId = nextManualRunner(game, round, contestantIndex)?.id ?? null;
+    }
+  } else {
+    round.currentTurnId = nextManualRunner(game, round, contestantIndex)?.id ?? null;
+  }
+
+  return { correct: category !== null, nextTurnId: round.currentTurnId, boardActive: round.boardActive };
+}
+
+function nextContestantMatching(contestants, previousIndex, predicate) {
+  for (let offset = 1; offset <= contestants.length; offset++) {
+    const contestant = contestants[(previousIndex + offset) % contestants.length];
+    if (predicate(contestant)) return contestant;
+  }
+  return null;
+}
+
+function nextManualRunner(game, round, previousIndex) {
+  return nextContestantMatching(game.contestants, previousIndex, (contestant) =>
+    !round.out.includes(contestant.id) && roundPoints(round, contestant.id) > 0);
 }
 
 /** Scores a correct single guess, then advances the current contestant either way. */
@@ -276,6 +338,8 @@ export function deserializeGame(json) {
             trackId: r.trackId,
             awards: r.awards && typeof r.awards === 'object' ? r.awards : {},
             out,
+            attempted: Array.isArray(r.attempted) ? r.attempted.filter((id) => typeof id === 'string') : [],
+            boardActive: r.boardActive === true,
             currentTurnId,
             turnDeadlineAt: Number.isSafeInteger(r.turnDeadlineAt) && r.turnDeadlineAt > 0 ? r.turnDeadlineAt : null,
             listenDeadlineAt: Number.isSafeInteger(r.listenDeadlineAt) && r.listenDeadlineAt > 0 ? r.listenDeadlineAt : null,

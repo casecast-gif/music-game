@@ -5,7 +5,10 @@ import {
   createContestant,
   createGame,
   DEFAULT_TARGET_SCORE,
+  MANUAL_DISPLAY_SECONDS,
+  MANUAL_TURN_SECONDS,
   guessTimeLimitSeconds,
+  manualClockDisplaySeconds,
   currentRound,
   currentTurn,
   deserializeGame,
@@ -15,6 +18,7 @@ import {
   parsePlaylistId,
   passTurn,
   removeContestant,
+  resolveManualTurn,
   resetScores,
   resolveGuess,
   roundPoints,
@@ -41,6 +45,16 @@ test('parsePlaylistId handles share links, URIs and bare IDs', () => {
 
 test('default playlist is the configured party playlist', () => {
   assert.equal(parsePlaylistId(DEFAULT_PLAYLIST_URL), ID);
+});
+
+test("I'm Steve clock shows ten seconds while timing out after fifteen", () => {
+  const deadlineAt = MANUAL_TURN_SECONDS * 1000;
+  assert.equal(MANUAL_DISPLAY_SECONDS, 10);
+  assert.equal(MANUAL_TURN_SECONDS, 15);
+  assert.equal(manualClockDisplaySeconds(deadlineAt, 0), 10);
+  assert.equal(manualClockDisplaySeconds(deadlineAt, 5_000), 5);
+  assert.equal(manualClockDisplaySeconds(deadlineAt, 10_000), 0);
+  assert.equal(manualClockDisplaySeconds(deadlineAt, deadlineAt), 0);
 });
 
 test('new games default to No Steve while legacy saved games retain I’m Steve', () => {
@@ -197,6 +211,67 @@ test('resolveGuess awards correct answers and advances after every single guess'
   assert.deepEqual(resolveGuess(game, 0, b.id, 'title', false), { correct: false, nextTurnId: null });
   assert.equal(getAward(game.rounds[0], b.id, 'title'), false);
   assert.deepEqual(game.rounds[0].out, [a.id, b.id]);
+});
+
+test("I'm Steve gives everyone a first attempt, then rotates among correct contestants", () => {
+  const game = createGame({ mode: 'im-steve' });
+  const a = createContestant('A');
+  const b = createContestant('B');
+  const c = createContestant('C');
+  for (const contestant of [a, b, c]) addContestant(game, contestant);
+  nextRound(game, ['x']);
+
+  assert.deepEqual(resolveManualTurn(game, 0, a.id, 'artist'), {
+    correct: true, nextTurnId: b.id, boardActive: false,
+  });
+  assert.deepEqual(resolveManualTurn(game, 0, b.id, 'title'), {
+    correct: true, nextTurnId: c.id, boardActive: false,
+  });
+  assert.deepEqual(resolveManualTurn(game, 0, c.id), {
+    correct: false, nextTurnId: a.id, boardActive: true,
+  });
+
+  assert.deepEqual(resolveManualTurn(game, 0, a.id), {
+    correct: false, nextTurnId: b.id, boardActive: true,
+  });
+  assert.deepEqual(resolveManualTurn(game, 0, b.id, 'year'), {
+    correct: true, nextTurnId: null, boardActive: true,
+  });
+  assert.deepEqual(game.rounds[0].out, [c.id, a.id]);
+  assert.equal(currentTurn(game), null);
+});
+
+test("I'm Steve ends when every first attempt is wrong", () => {
+  const game = createGame({ mode: 'im-steve' });
+  const a = createContestant('A');
+  const b = createContestant('B');
+  addContestant(game, a);
+  addContestant(game, b);
+  nextRound(game, ['x']);
+
+  resolveManualTurn(game, 0, a.id);
+  assert.equal(currentTurn(game).id, b.id);
+  assert.deepEqual(resolveManualTurn(game, 0, b.id), {
+    correct: false, nextTurnId: null, boardActive: true,
+  });
+  assert.deepEqual(game.rounds[0].out, [a.id, b.id]);
+});
+
+test("I'm Steve lets a lone successful player keep running the board", () => {
+  const game = createGame({ mode: 'im-steve' });
+  const contestants = ['A', 'B', 'C', 'D'].map((name) => createContestant(name));
+  contestants.forEach((contestant) => addContestant(game, contestant));
+  nextRound(game, ['x']);
+
+  resolveManualTurn(game, 0, contestants[0].id, 'artist');
+  resolveManualTurn(game, 0, contestants[1].id);
+  resolveManualTurn(game, 0, contestants[2].id);
+  resolveManualTurn(game, 0, contestants[3].id);
+  assert.equal(currentTurn(game).id, contestants[0].id);
+  assert.equal(game.rounds[0].boardActive, true);
+
+  assert.equal(resolveManualTurn(game, 0, contestants[0].id, 'title').nextTurnId, contestants[0].id);
+  assert.equal(resolveManualTurn(game, 0, contestants[0].id, 'year').nextTurnId, null);
 });
 
 test('removing a contestant and resetting scores', () => {

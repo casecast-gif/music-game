@@ -81,6 +81,8 @@ aside .score-table td:nth-child(2), aside .score-table th:nth-child(2) { text-al
 #round-scoring tr.current-turn td { background: #203328; }
 #round-scoring tr.out td { color: var(--muted); }
 #round-scoring tr.out .toggle { opacity: 0.35; }
+.manual-clock-controls { display: flex; align-items: center; gap: 1rem; margin: 0.5rem 0 0.75rem; }
+.manual-clock-display { color: var(--danger); font-size: clamp(2.5rem, 8vw, 4rem); font-variant-numeric: tabular-nums; font-weight: 800; line-height: 1; }
 .auto-turn { margin: 0.75rem 0 1rem; padding: 1rem; border: 1px solid var(--border); border-radius: 10px; background: #202020; }
 .turn-clock { display: flex; align-items: center; gap: 0.75rem; font-variant-numeric: tabular-nums; font-size: 1.15rem; font-weight: 700; }
 .turn-clock progress { flex: 1; height: 1rem; accent-color: var(--accent); }

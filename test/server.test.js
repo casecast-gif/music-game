@@ -19,7 +19,7 @@ test('server serves the host page', async () => {
     const html = await res.text();
     assert.match(html, /<title>Music Game<\/title>/);
     assert.match(html, /id="mode-no-steve"[^>]*aria-pressed="true">No Steve<\/button>/);
-    assert.match(html, /id="mode-im-steve"[^>]*disabled[^>]*>I'm Steve<\/button>/);
+    assert.match(html, /id="mode-im-steve"[^>]*aria-pressed="false">I'm Steve<\/button>/);
     assert.match(html, /id="open-spotify-player"/);
     const playerPage = await fetch(`http://127.0.0.1:${port}/spotify-player.html`);
     assert.equal(playerPage.status, 200);
