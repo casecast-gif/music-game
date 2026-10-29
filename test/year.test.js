@@ -52,7 +52,8 @@ function fakeFetch(routes) {
     for (const [pattern, response] of routes) {
       if (url.includes(pattern)) {
         if (response instanceof Error) throw response;
-        return { ok: response.status === undefined, status: response.status ?? 200, json: async () => response };
+        if (response.status) return { ok: false, status: response.status, json: async () => ({}) };
+        return { ok: true, status: 200, json: async () => response };
       }
     }
     return { ok: false, status: 404, json: async () => ({}) };
@@ -68,16 +69,22 @@ test('resolveOriginalYear prefers the earliest MusicBrainz year', async () => {
     ['/isrc/GBAYE0601690', { recordings: [{ 'first-release-date': '1968-08-26' }] }],
     ['/recording?', { recordings: [] }],
   ]);
-  assert.deepEqual(await resolveOriginalYear(track, { fetchImpl }), { year: 1968, source: 'musicbrainz' });
+  assert.deepEqual(await resolveOriginalYear(track, { fetchImpl }), { year: 1968, source: 'musicbrainz', complete: true });
   assert.ok(fetchImpl.calls.every((u) => u.startsWith('https://musicbrainz.org/ws/2/') && u.includes('fmt=json')));
 });
 
 test('resolveOriginalYear falls back to Spotify on errors', async () => {
   const fetchImpl = fakeFetch([['musicbrainz', new Error('offline')]]);
-  assert.deepEqual(await resolveOriginalYear(track, { fetchImpl }), { year: 2015, source: 'spotify' });
+  assert.deepEqual(await resolveOriginalYear(track, { fetchImpl }), { year: 2015, source: 'spotify', complete: false });
 });
 
 test('resolveOriginalYear ignores MusicBrainz years later than Spotify', async () => {
   const fetchImpl = fakeFetch([['/isrc/', { recordings: [{ 'first-release-date': '2020' }] }]]);
-  assert.deepEqual(await resolveOriginalYear(track, { fetchImpl }), { year: 2015, source: 'spotify' });
+  // the recording search 404s, which means "not found" rather than a failure
+  assert.deepEqual(await resolveOriginalYear(track, { fetchImpl }), { year: 2015, source: 'spotify', complete: true });
+});
+
+test('resolveOriginalYear marks rate-limited lookups as incomplete', async () => {
+  const fetchImpl = fakeFetch([['musicbrainz', { status: 503 }]]);
+  assert.deepEqual(await resolveOriginalYear(track, { fetchImpl }), { year: 2015, source: 'spotify', complete: false });
 });

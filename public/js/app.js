@@ -48,6 +48,7 @@ const state = {
   revealed: false,
   years: loadJson(KEYS.years, {}),
   yearOverrides: loadJson(KEYS.yearOverrides, {}),
+  fallbackYears: {},
   pendingYears: new Set(),
   spotify: null,
   playerPromise: null,
@@ -197,7 +198,7 @@ async function playCurrent() {
 
 function yearFor(trackId) {
   if (state.yearOverrides[trackId] != null) return { year: state.yearOverrides[trackId], source: 'manual' };
-  return state.years[trackId] ?? null;
+  return state.years[trackId] ?? state.fallbackYears[trackId] ?? null;
 }
 
 function prefetchYear(trackId) {
@@ -205,9 +206,14 @@ function prefetchYear(trackId) {
   if (!track || yearFor(trackId) || state.pendingYears.has(trackId)) return;
   state.pendingYears.add(trackId);
   resolveOriginalYear(track)
-    .then((result) => {
-      state.years[trackId] = result;
-      localStorage.setItem(KEYS.years, JSON.stringify(state.years));
+    .then(({ year, source, complete }) => {
+      if (complete) {
+        state.years[trackId] = { year, source };
+        localStorage.setItem(KEYS.years, JSON.stringify(state.years));
+      } else {
+        // Lookup failed part-way: show the fallback now but retry on a later visit.
+        state.fallbackYears[trackId] = { year, source };
+      }
     })
     .finally(() => {
       state.pendingYears.delete(trackId);

@@ -135,13 +135,21 @@ export function logout() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+let refreshPromise = null;
+
 export async function getAccessToken(clientId) {
   const token = loadToken();
   if (!token) throw new Error('Not logged in to Spotify');
   if (Date.now() < token.expiresAt) return token.accessToken;
   if (!token.refreshToken) throw new Error('Spotify session expired, please log in again');
-  const data = await tokenRequest({ client_id: clientId, grant_type: 'refresh_token', refresh_token: token.refreshToken });
-  return saveToken(data, token).accessToken;
+  // Share one in-flight refresh: Spotify may rotate the refresh token, so
+  // concurrent refreshes with the same token could invalidate the session.
+  refreshPromise ??= tokenRequest({ client_id: clientId, grant_type: 'refresh_token', refresh_token: token.refreshToken })
+    .then((data) => saveToken(data, token).accessToken)
+    .finally(() => {
+      refreshPromise = null;
+    });
+  return refreshPromise;
 }
 
 export class SpotifyClient {

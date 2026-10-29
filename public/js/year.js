@@ -77,39 +77,45 @@ async function mbGet(path, fetchImpl) {
     const res = await fetchImpl(`${MB_BASE}${path}${path.includes('?') ? '&' : '?'}fmt=json`, {
       headers: { Accept: 'application/json' },
     });
-    if (!res.ok) throw new Error(`MusicBrainz ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(`MusicBrainz ${res.status}`), { status: res.status });
     return res.json();
   });
 }
 
 /**
- * Returns { year, source } where source is 'musicbrainz' or 'spotify'.
+ * Returns { year, source, complete } where source is 'musicbrainz' or 'spotify'.
+ * `complete` is false when a MusicBrainz request failed (network error, rate
+ * limit, ...) so callers can retry later instead of caching the fallback.
  * Never throws: network problems fall back to the Spotify year.
  */
 export async function resolveOriginalYear(track, { fetchImpl = globalThis.fetch } = {}) {
   const spotifyYear = yearFromDate(track.releaseDate);
   const candidates = [];
-  try {
-    if (track.isrc) {
-      candidates.push(yearFromIsrcResponse(await mbGet(`/isrc/${encodeURIComponent(track.isrc)}`, fetchImpl)));
+  let complete = true;
+  const attempt = async (fn) => {
+    try {
+      candidates.push(await fn());
+    } catch (err) {
+      if (err?.status !== 404) complete = false; // 404 just means "not known to MusicBrainz"
     }
-  } catch {
-    // ISRC not known to MusicBrainz (404) or network error
+  };
+  if (track.isrc) {
+    await attempt(async () => yearFromIsrcResponse(await mbGet(`/isrc/${encodeURIComponent(track.isrc)}`, fetchImpl)));
   }
-  try {
-    const artist = track.artists?.[0];
-    if (artist && track.title) {
-      const query = `recording:${luceneQuote(cleanTitle(track.title))} AND artist:${luceneQuote(artist)}`;
-      const data = await mbGet(`/recording?limit=25&query=${encodeURIComponent(query)}`, fetchImpl);
-      candidates.push(yearFromSearchResponse(data, { title: track.title, artist }));
-    }
-  } catch {
-    // ignore and fall back
+  const artist = track.artists?.[0];
+  if (artist && track.title) {
+    const query = `recording:${luceneQuote(cleanTitle(track.title))} AND artist:${luceneQuote(artist)}`;
+    await attempt(async () =>
+      yearFromSearchResponse(await mbGet(`/recording?limit=25&query=${encodeURIComponent(query)}`, fetchImpl), {
+        title: track.title,
+        artist,
+      }),
+    );
   }
   const mbYears = candidates.filter((y) => y !== null);
   const mbYear = mbYears.length ? Math.min(...mbYears) : null;
   if (mbYear !== null && (spotifyYear === null || mbYear <= spotifyYear)) {
-    return { year: mbYear, source: 'musicbrainz' };
+    return { year: mbYear, source: 'musicbrainz', complete };
   }
-  return { year: spotifyYear, source: 'spotify' };
+  return { year: spotifyYear, source: 'spotify', complete };
 }
