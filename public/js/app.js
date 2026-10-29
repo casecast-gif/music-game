@@ -63,6 +63,16 @@ function loadJson(key, fallback) {
   }
 }
 
+function readPlaylistCache(playlistId) {
+  const cache = loadJson(KEYS.playlistCache, null);
+  if (
+    cache?.playlistId === playlistId &&
+    Array.isArray(cache.tracks) &&
+    cache.tracks.every((track) => track && typeof track.id === 'string' && typeof track.uri === 'string')
+  ) return cache;
+  return null;
+}
+
 function loadMockPlaylist() {
   state.loadingPlaylist = false;
   state.playlistName = MOCK_PLAYLIST_NAME;
@@ -255,16 +265,29 @@ async function loadPlaylist() {
   renderSetup();
   setStatus('Loading playlist…');
   const client = spotify();
+  let info = null;
   let name;
   let tracks;
   try {
-    tracks = await client.getPlaylistTracks(playlistId, {
-      onProgress: (loaded, total) => {
-        setStatus(`Loading playlist… ${loaded.toLocaleString()} / ${total.toLocaleString()}`);
-        $('playlist-state').textContent = `Loading… ${loaded.toLocaleString()} / ${total.toLocaleString()}`;
-      },
-    });
-    name = await client.getPlaylistName(playlistId);
+    try {
+      info = await client.getPlaylistInfo(playlistId);
+    } catch (err) {
+      if (err.status === 429) throw err;
+      console.warn('Could not check the playlist snapshot; loading tracks anyway.', err);
+    }
+    const cache = readPlaylistCache(playlistId);
+    if (info?.snapshotId && cache?.snapshotId === info.snapshotId) {
+      name = info.name ?? cache.name;
+      tracks = cache.tracks;
+    } else {
+      tracks = await client.getPlaylistTracks(playlistId, {
+        onProgress: (loaded, total) => {
+          setStatus(`Loading playlist… ${loaded.toLocaleString()} / ${total.toLocaleString()}`);
+          $('playlist-state').textContent = `Loading… ${loaded.toLocaleString()} / ${total.toLocaleString()}`;
+        },
+      });
+      name = info?.name ?? null;
+    }
   } catch (err) {
     if (err.status === 403) {
       throw new Error('Spotify blocked this playlist (403). Log in as the playlist owner/collaborator or use a copy saved to your account.');
@@ -282,6 +305,7 @@ async function loadPlaylist() {
     localStorage.setItem(KEYS.playlistCache, JSON.stringify({
       playlistId,
       name,
+      snapshotId: info?.snapshotId ?? null,
       tracks: [...state.tracks.values()],
     }));
     $('setup-settings').open = false;
@@ -1495,13 +1519,8 @@ document.addEventListener('keydown', (e) => {
       if (state.clientId && (await handleRedirect(state.clientId))) setStatus('Connected to Spotify ✓');
       renderSetup();
       const playlistId = parsePlaylistId(state.playlistInput);
-      const cache = loadJson(KEYS.playlistCache, null);
-      if (
-        playlistId &&
-        cache?.playlistId === playlistId &&
-        Array.isArray(cache.tracks) &&
-        cache.tracks.every((track) => track && typeof track.id === 'string' && typeof track.uri === 'string')
-      ) {
+      const cache = playlistId ? readPlaylistCache(playlistId) : null;
+      if (cache) {
         state.playlistName = typeof cache.name === 'string' ? cache.name : null;
         state.tracks = new Map(cache.tracks.map((track) => [track.id, track]));
         if (state.clientId && isLoggedIn()) $('setup-settings').open = false;

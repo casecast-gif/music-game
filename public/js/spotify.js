@@ -147,27 +147,47 @@ export function logout() {
 
 let refreshPromise = null;
 
-function assertQuotaAvailable() {
+function assertCooldownAvailable(key, reason, description) {
   const storage = globalThis.localStorage;
-  const stored = storage?.getItem(QUOTA_COOLDOWN_KEY);
+  const stored = storage?.getItem(key);
   if (!stored) return;
   if (stored === 'blocked') {
-    throw Object.assign(new Error('Spotify has reported QUOTA_EXCEEDED. API requests are blocked in this browser until the cooldown is known to have expired.'), {
+    throw Object.assign(new Error(description), {
       status: 429,
-      reason: 'QUOTA_EXCEEDED',
+      reason,
     });
   }
   const until = Number(stored);
   if (!Number.isFinite(until) || until <= Date.now()) {
-    storage.removeItem(QUOTA_COOLDOWN_KEY);
+    storage.removeItem(key);
     return;
   }
   const seconds = Math.ceil((until - Date.now()) / 1000);
-  throw Object.assign(new Error(`Spotify quota cooldown is active for about ${seconds.toLocaleString()} more seconds. No API request was sent.`), {
+  throw Object.assign(new Error(`${description} No API request was sent; try again in about ${seconds.toLocaleString()} seconds.`), {
     status: 429,
-    reason: 'QUOTA_EXCEEDED',
+    reason,
     retryAfter: seconds,
   });
+}
+
+function assertApiAvailable() {
+  assertCooldownAvailable(
+    QUOTA_COOLDOWN_KEY,
+    'QUOTA_EXCEEDED',
+    'Spotify has reported QUOTA_EXCEEDED. API requests are blocked in this browser until the cooldown is known to have expired.',
+  );
+  assertCooldownAvailable(
+    RATE_LIMIT_COOLDOWN_KEY,
+    'RATE_LIMITED',
+    'Spotify rate limit cooldown is active.',
+  );
+}
+
+function rateLimitDelay(error, attempt) {
+  if (Number.isFinite(error.retryAfter) && error.retryAfter >= 0) {
+    return error.retryAfter * 1000;
+  }
+  return Math.min(30_000, Math.round(1000 * (2 ** attempt) * (0.8 + Math.random() * 0.4)));
 }
 
 export async function getAccessToken(clientId) {
@@ -191,89 +211,88 @@ export class SpotifyClient {
     this.deviceId = null;
     this.player = null;
     this.playbackQueue = Promise.resolve();
+    this.apiQueue = Promise.resolve();
   }
 
-  async api(path, { method = 'GET', body, query } = {}) {
-    assertQuotaAvailable();
+  api(path, options = {}) {
+    const request = this.apiQueue.catch(() => {}).then(() => this.request(path, options));
+    this.apiQueue = request.catch(() => {});
+    return request;
+  }
+
+  async request(path, { method = 'GET', body, query } = {}) {
+    assertApiAvailable();
     const token = await getAccessToken(this.clientId);
     const url = new URL(path.startsWith('http') ? path : `${API}${path}`);
     if (query) for (const [k, v] of Object.entries(query)) if (v != null) url.searchParams.set(k, v);
-    const res = await fetch(url, {
-      method,
-      headers: { Accept: 'application/json', Authorization: 'Bearer ' + token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (res.status === 204) return null;
-    const text = await res.text();
-    const makeError = (message) => {
-      const error = new Error(message);
-      error.status = res.status;
-      const retryAfter = res.headers.get('Retry-After');
-      error.retryAfter = retryAfter === null ? null : Number(retryAfter);
-      error.reason = data?.error?.reason ?? null;
-      return error;
-    };
-    let data = null;
-    if (text) {
-      try {
-        data = JSON.parse(text);
-      } catch {
-        throw makeError(res.ok
-          ? `Spotify returned an invalid non-JSON response (HTTP ${res.status}).`
-          : `Spotify API error ${res.status}: received a non-JSON response.`);
-      }
-    }
-    if (!res.ok) {
-      const error = makeError(data?.error?.message || `Spotify API error ${res.status}`);
-      if (error.status === 429 && error.reason === 'QUOTA_EXCEEDED') {
-        const storage = globalThis.localStorage;
-        if (storage) {
-          storage.setItem(
-            QUOTA_COOLDOWN_KEY,
-            Number.isFinite(error.retryAfter) && error.retryAfter >= 0
-              ? String(Date.now() + error.retryAfter * 1000)
-              : 'blocked',
-          );
+    for (let attempt = 0; ; attempt += 1) {
+      const res = await fetch(url, {
+        method,
+        headers: { Accept: 'application/json', Authorization: 'Bearer ' + token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (res.status === 204) return null;
+      const text = await res.text();
+      const makeError = (message) => {
+        const error = new Error(message);
+        error.status = res.status;
+        const retryAfter = res.headers.get('Retry-After');
+        error.retryAfter = retryAfter === null ? null : Number(retryAfter);
+        error.reason = data?.error?.reason ?? null;
+        return error;
+      };
+      let data = null;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw makeError(res.ok
+            ? `Spotify returned an invalid non-JSON response (HTTP ${res.status}).`
+            : `Spotify API error ${res.status}: received a non-JSON response.`);
         }
       }
-      throw error;
+      if (!res.ok) {
+        const error = makeError(data?.error?.message || `Spotify API error ${res.status}`);
+        if (error.status === 429) {
+          const storage = globalThis.localStorage;
+          if (error.reason === 'QUOTA_EXCEEDED') {
+            storage?.setItem(
+              QUOTA_COOLDOWN_KEY,
+              Number.isFinite(error.retryAfter) && error.retryAfter >= 0
+                ? String(Date.now() + error.retryAfter * 1000)
+                : 'blocked',
+            );
+            throw error;
+          }
+
+          const delay = rateLimitDelay(error, attempt);
+          storage?.setItem(RATE_LIMIT_COOLDOWN_KEY, String(Date.now() + delay));
+          if (
+            method !== 'GET' ||
+            attempt >= MAX_RATE_LIMIT_RETRIES ||
+            delay > MAX_AUTOMATIC_RETRY_WAIT_MS
+          ) throw error;
+          await new Promise((resolve) => setTimeout(resolve, delay + 25));
+          continue;
+        }
+        throw error;
+      }
+      return data;
     }
-    return data;
   }
 
   getProfile() {
     return this.api('/me');
   }
 
-  async getPlaylistName(playlistId) {
-    try {
-      const data = await this.api(`/playlists/${playlistId}`, { query: { fields: 'name' } });
-      return data?.name ?? null;
-    } catch {
-      return null;
-    }
+  async getPlaylistInfo(playlistId) {
+    const data = await this.api(`/playlists/${playlistId}`, { query: { fields: 'name,snapshot_id' } });
+    return { name: data?.name ?? null, snapshotId: data?.snapshot_id ?? null };
   }
 
   /** Loads playlist pages sequentially to avoid request bursts in development mode. */
   async getPlaylistTracks(playlistId, { onProgress = () => {} } = {}) {
     const tracks = [];
-    const fetchPage = async (offset) => {
-      let attempt = 0;
-      while (true) {
-        try {
-          return await this.api(`/playlists/${playlistId}/items`, {
-            query: { limit: PLAYLIST_PAGE_SIZE, offset, additional_types: 'track' },
-          });
-        } catch (err) {
-          if (err.status !== 429 || err.reason === 'QUOTA_EXCEEDED' || attempt >= 3) throw err;
-          const delay = Number.isFinite(err.retryAfter)
-            ? Math.max(0, err.retryAfter * 1000)
-            : Math.min(30000, Math.round(1000 * (2 ** attempt) * (0.8 + Math.random() * 0.4)));
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          attempt += 1;
-        }
-      }
-    };
     const append = (page) => {
       for (const entry of page?.items ?? []) {
         const track = normalizePlaylistItem(entry);
@@ -281,7 +300,9 @@ export class SpotifyClient {
       }
     };
 
-    const first = await fetchPage(0);
+    const first = await this.api(`/playlists/${playlistId}/items`, {
+      query: { limit: PLAYLIST_PAGE_SIZE, offset: 0, additional_types: 'track' },
+    });
     append(first);
     let loaded = first?.items?.length ?? 0;
     const total = first?.total;
@@ -302,7 +323,9 @@ export class SpotifyClient {
     const offsets = [];
     for (let offset = PLAYLIST_PAGE_SIZE; offset < total; offset += PLAYLIST_PAGE_SIZE) offsets.push(offset);
     for (const offset of offsets) {
-      const page = await fetchPage(offset);
+      const page = await this.api(`/playlists/${playlistId}/items`, {
+        query: { limit: PLAYLIST_PAGE_SIZE, offset, additional_types: 'track' },
+      });
       append(page);
       loaded += page?.items?.length ?? 0;
       onProgress(loaded, total);

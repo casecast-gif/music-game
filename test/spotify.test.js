@@ -58,17 +58,12 @@ test('getPlaylistTracks loads pages sequentially in order and reports progress',
   const total = 423;
   let activeRequests = 0;
   let peakRequests = 0;
-  let rateLimitRetries = 0;
   client.api = async (_path, { query } = {}) => {
     activeRequests += 1;
     peakRequests = Math.max(peakRequests, activeRequests);
     await new Promise((resolve) => setTimeout(resolve, 2));
     activeRequests -= 1;
     const offset = query?.offset ?? 0;
-    if (offset === 50 && rateLimitRetries === 0) {
-      rateLimitRetries += 1;
-      throw Object.assign(new Error('API rate limit exceeded'), { status: 429, retryAfter: 0.001 });
-    }
     const items = Array.from({ length: Math.min(50, total - offset) }, (_, index) => {
       const id = `track-${offset + index}`;
       return { item: { ...rawTrack, id, uri: `spotify:track:${id}` } };
@@ -85,8 +80,23 @@ test('getPlaylistTracks loads pages sequentially in order and reports progress',
   assert.equal(tracks[0].id, 'track-0');
   assert.equal(tracks.at(-1).id, `track-${total - 1}`);
   assert.equal(peakRequests, 1);
-  assert.equal(rateLimitRetries, 1);
   assert.deepEqual(progress.at(-1), [total, total]);
+});
+
+test('getPlaylistInfo requests the playlist snapshot with its name', async () => {
+  const client = new SpotifyClient('unused');
+  let request;
+  client.api = async (path, options) => {
+    request = { path, options };
+    return { name: 'Playlist', snapshot_id: 'snapshot-123' };
+  };
+
+  assert.deepEqual(await client.getPlaylistInfo('playlist-id'), {
+    name: 'Playlist',
+    snapshotId: 'snapshot-123',
+  });
+  assert.equal(request.path, '/playlists/playlist-id');
+  assert.deepEqual(request.options.query, { fields: 'name,snapshot_id' });
 });
 
 test('getPlaylistTracks does not retry a development quota-exceeded response', async () => {
@@ -142,6 +152,127 @@ test('Spotify quota cooldown blocks subsequent requests in the same browser prof
 
   await assert.rejects(client.api('/me'), { status: 429, reason: 'QUOTA_EXCEEDED' });
   await assert.rejects(client.api('/me'), /No API request was sent/);
+  assert.equal(requests, 1);
+});
+
+test('API GET requests honor Retry-After and retry within a bounded policy', async (t) => {
+  const previous = {
+    fetch: globalThis.fetch,
+    localStorage: globalThis.localStorage,
+  };
+  t.after(() => {
+    if (previous.fetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = previous.fetch;
+    if (previous.localStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previous.localStorage;
+  });
+
+  const values = new Map([[
+    'musicGame.spotifyToken',
+    JSON.stringify({ accessToken: 'test-token', expiresAt: Date.now() + 60_000 }),
+  ]]);
+  globalThis.localStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests += 1;
+    if (requests === 1) {
+      return new Response(JSON.stringify({
+        error: { status: 429, message: 'Too many requests' },
+      }), { status: 429, headers: { 'Retry-After': '0.01' } });
+    }
+    return new Response('{"ok":true}', { status: 200 });
+  };
+  const startedAt = Date.now();
+
+  assert.deepEqual(await new SpotifyClient('unused').api('/me'), { ok: true });
+
+  assert.equal(requests, 2);
+  assert.ok(Date.now() - startedAt >= 20);
+});
+
+test('API GET requests use bounded jittered backoff when Retry-After is absent', async (t) => {
+  const previous = {
+    fetch: globalThis.fetch,
+    localStorage: globalThis.localStorage,
+    setTimeout: globalThis.setTimeout,
+  };
+  t.after(() => {
+    if (previous.fetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = previous.fetch;
+    if (previous.localStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previous.localStorage;
+    globalThis.setTimeout = previous.setTimeout;
+  });
+
+  const values = new Map([[
+    'musicGame.spotifyToken',
+    JSON.stringify({ accessToken: 'test-token', expiresAt: Date.now() + 60_000 }),
+  ]]);
+  globalThis.localStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+  let requests = 0;
+  const delays = [];
+  globalThis.fetch = async () => {
+    requests += 1;
+    return new Response('{"error":{"status":429,"message":"Too many requests"}}', { status: 429 });
+  };
+  globalThis.setTimeout = (callback, delay) => {
+    delays.push(delay);
+    queueMicrotask(callback);
+    return 0;
+  };
+
+  await assert.rejects(new SpotifyClient('unused').api('/me'), /Too many requests/);
+
+  assert.equal(requests, 4);
+  assert.equal(delays.length, 3);
+  for (const [attempt, delay] of delays.entries()) {
+    const base = 1000 * (2 ** attempt);
+    assert.ok(delay >= base * 0.8 + 25);
+    assert.ok(delay <= base * 1.2 + 25);
+  }
+});
+
+test('non-GET rate limits block later API requests during Retry-After', async (t) => {
+  const previous = {
+    fetch: globalThis.fetch,
+    localStorage: globalThis.localStorage,
+  };
+  t.after(() => {
+    if (previous.fetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = previous.fetch;
+    if (previous.localStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previous.localStorage;
+  });
+
+  const values = new Map([[
+    'musicGame.spotifyToken',
+    JSON.stringify({ accessToken: 'test-token', expiresAt: Date.now() + 60_000 }),
+  ]]);
+  globalThis.localStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+  };
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests += 1;
+    return new Response('{"error":{"status":429,"message":"Too many requests"}}', {
+      status: 429,
+      headers: { 'Retry-After': '60' },
+    });
+  };
+  const client = new SpotifyClient('unused');
+
+  await assert.rejects(client.api('/me/player/play', { method: 'PUT' }), { status: 429 });
+  await assert.rejects(client.api('/me'), { status: 429, reason: 'RATE_LIMITED' });
   assert.equal(requests, 1);
 });
 

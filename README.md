@@ -29,6 +29,8 @@ The app starts in **Mock data** mode and makes no Spotify API requests. Use the 
    - Production: `https://casecast-gif.github.io/music-game/`.
 4. The app's public **Client ID** is prefilled. If you use a different Spotify developer app, replace it with that app's Client ID.
 5. Apps in development mode only work for users you add under **User Management**, so add the Spotify account you'll host with.
+If the app is operated by an eligible organization and needs more access, use Spotify's official quota-extension request
+in the Developer Dashboard; approval is not guaranteed. Do not create extra apps or accounts to work around a limit.
 
 > Spotify development-mode apps can only read playlists the logged-in user owns or collaborates on. If loading the
 > playlist fails with a 403, log in with the playlist owner's account, or save a copy of the playlist to your own account
@@ -44,11 +46,11 @@ Open <http://127.0.0.1:8888/>, then:
 
 1. The default **Mock data** mode loads bundled sample songs and simulates silent playback without calling Spotify or MusicBrainz. Use it for game development without consuming API quota.
 2. To test Spotify, open **Settings & troubleshooting**, select **Live Spotify API**, then click **Log in with Spotify**. Each browser has separate saved settings; the configured Client ID is prefilled in each one.
-3. After login, click **Load playlist** to fetch the selected playlist. It is cached in that browser so later visits can start quickly. Playlist loading is never automatic in Live mode.
+3. After login, click **Load playlist** to fetch the selected playlist. It is cached in that browser so later visits can start quickly. On an explicit reload, the app checks Spotify's playlist snapshot first and skips downloading pages if the playlist has not changed. Playlist loading is never automatic in Live mode.
 4. Select **No Steve** for automatic play or **I'm Steve** for the host-controlled version. Choose the target score (default 15). The first No Steve guess gets 60 seconds; each later player gets 20 seconds. No Steve ends after the current song when a player or team reaches the target; I'm Steve can continue past it.
 5. Add players. To make a team, enter a team name plus its members (comma separated); leave members empty for a solo player. Press **Start game** when ready.
 
-The API mode is shared between tabs in the same browser profile. A Spotify `QUOTA_EXCEEDED` response is remembered in that profile; subsequent API calls are blocked until Spotify's `Retry-After` period expires. Mock mode remains available during that cooldown.
+The API mode is shared between tabs in the same browser profile. Spotify API requests are serialized per tab. On ordinary `429` responses, safe `GET` requests use bounded backoff and honor `Retry-After`; other requests are not repeated. The cooldown is shared across tabs in the browser profile. A `QUOTA_EXCEEDED` response blocks further requests until Spotify's `Retry-After` period expires (or until it is known to have expired when Spotify omits the header). Mock mode remains available during either cooldown.
 
 ### During the game
 
