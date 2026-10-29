@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Music Game Host</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>🎵 Music Game Host</h1>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+    </header>
+
+    <main>
+      <section id="setup" class="panel">
+        <h2>1. Connect Spotify</h2>
+        <form id="spotify-form" class="row">
+          <label>
+            Spotify Client ID
+            <input id="client-id" autocomplete="off" spellcheck="false" placeholder="from developer.spotify.com/dashboard" />
+          </label>
+          <button id="login" type="submit">Log in with Spotify</button>
+          <button id="logout" type="button" class="secondary" hidden>Log out</button>
+        </form>
+        <p class="hint">
+          Redirect URI to register in your Spotify app: <code id="redirect-uri"></code>
+        </p>
+
+        <h2>2. Playlist</h2>
+        <form id="playlist-form" class="row">
+          <label>
+            Playlist link or ID
+            <input id="playlist" autocomplete="off" spellcheck="false" />
+          </label>
+          <button type="submit">Load playlist</button>
+        </form>
+        <p id="playlist-info" class="hint"></p>
+
+        <h2>3. Players &amp; teams</h2>
+        <form id="contestant-form" class="row">
+          <label>
+            Player or team name
+            <input id="contestant-name" autocomplete="off" required />
+          </label>
+          <label>
+            Team members <span class="muted">(optional, comma separated)</span>
+            <input id="contestant-members" autocomplete="off" placeholder="leave empty for a solo player" />
+          </label>
+          <button type="submit">Add</button>
+        </form>
+        <ul id="contestant-list" class="contestant-list"></ul>
+
+        <div class="row actions">
+          <button id="start" type="button" class="primary" disabled>Start game</button>
+          <button id="resume" type="button" hidden>Resume game</button>
+        </div>
+      </section>
+
+      <section id="game" class="panel" hidden>
+        <div class="game-grid">
+          <div>
+            <div class="round-header">
+              <h2 id="round-title">Song 1</h2>
+              <span id="deck-info" class="muted"></span>
+            </div>
+
+            <div id="song-card" class="song-card hidden-answer">
+              <img id="cover" alt="" />
+              <div class="answers">
+                <div><span class="label">Artist</span><span id="answer-artist" class="answer"></span></div>
+                <div><span class="label">Title</span><span id="answer-title" class="answer"></span></div>
+                <div>
+                  <span class="label">Year</span>
+                  <span class="answer year-answer">
+                    <input id="answer-year" type="number" min="1800" max="2100" aria-label="Original release year" />
+                    <small id="year-source" class="muted"></small>
+                  </span>
+                </div>
+                <div class="muted small" id="answer-album"></div>
+              </div>
+              <div class="mystery" aria-hidden="true">?</div>
+            </div>
+
+            <div class="row controls">
+              <button id="play-pause" type="button">⏯ Play / Pause</button>
+              <button id="replay" type="button" class="secondary">⏮ Restart song</button>
+              <button id="reveal" type="button" class="primary">👀 Reveal answer</button>
+              <button id="next" type="button" class="primary">⏭ Next song</button>
+            </div>
+            <div class="row">
+              <label class="inline">
+                Play on
+                <select id="device"></select>
+              </label>
+              <button id="refresh-devices" type="button" class="secondary small">↻</button>
+            </div>
+
+            <h3>Score this song</h3>
+            <table class="score-table">
+              <thead>
+                <tr><th>Player / team</th><th>Artist</th><th>Title</th><th>Year</th><th>Pts</th></tr>
+              </thead>
+              <tbody id="round-scoring"></tbody>
+            </table>
+          </div>
+
+          <aside>
+            <h3>Scoreboard</h3>
+            <table class="score-table">
+              <thead>
+                <tr><th>#</th><th>Player / team</th><th title="Artist">A</th><th title="Title">T</th><th title="Year">Y</th><th>Total</th></tr>
+              </thead>
+              <tbody id="scoreboard"></tbody>
+            </table>
+
+            <h3>Played songs</h3>
+            <ol id="history" class="history" reversed></ol>
+
+            <div class="row actions">
+              <button id="back-to-setup" type="button" class="secondary">⚙ Setup</button>
+              <button id="reset-scores" type="button" class="danger">Reset scores</button>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>

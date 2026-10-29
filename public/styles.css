@@ -1,0 +1,69 @@
+:root {
+  --bg: #121212;
+  --panel: #1e1e1e;
+  --text: #f2f2f2;
+  --muted: #9a9a9a;
+  --accent: #1db954;
+  --danger: #e2504c;
+  --border: #333;
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); }
+header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem 1.5rem; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+h1 { margin: 0; font-size: 1.5rem; }
+h2 { font-size: 1.15rem; margin: 1.25rem 0 0.5rem; }
+h3 { margin: 1.25rem 0 0.5rem; }
+main { max-width: 1200px; margin: 0 auto; padding: 1rem 1.5rem 3rem; }
+.panel { background: var(--panel); border-radius: 12px; padding: 1rem 1.5rem 1.5rem; }
+.row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end; margin: 0.5rem 0; }
+label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; color: var(--muted); flex: 1 1 220px; }
+label.inline { flex-direction: row; align-items: center; flex: 0 1 auto; }
+input, select { background: #2a2a2a; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 0.55rem 0.65rem; font-size: 1rem; }
+button { background: #2f2f2f; color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 0.6rem 1.1rem; font-size: 1rem; cursor: pointer; }
+button:hover:not(:disabled) { filter: brightness(1.2); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 600; }
+button.secondary { background: transparent; }
+button.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+button.small, .small { font-size: 0.85rem; padding: 0.35rem 0.7rem; }
+.muted { color: var(--muted); }
+.hint { color: var(--muted); font-size: 0.85rem; margin: 0.25rem 0; }
+code { background: #2a2a2a; padding: 0.1rem 0.35rem; border-radius: 4px; }
+.status { font-size: 0.9rem; color: var(--muted); }
+.status.error { color: var(--danger); }
+.actions { margin-top: 1.25rem; }
+
+.contestant-list { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.contestant-list li { background: #2a2a2a; border-radius: 999px; padding: 0.35rem 0.5rem 0.35rem 0.9rem; display: flex; align-items: center; gap: 0.5rem; }
+.contestant-list button { padding: 0.1rem 0.5rem; font-size: 0.85rem; }
+
+.game-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr); gap: 2rem; }
+@media (max-width: 850px) { .game-grid { grid-template-columns: 1fr; } }
+.round-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+
+.song-card { position: relative; display: flex; gap: 1.25rem; align-items: center; background: #262626; border-radius: 12px; padding: 1.25rem; min-height: 200px; }
+.song-card img { width: 160px; height: 160px; border-radius: 8px; object-fit: cover; background: #333; }
+.answers { display: grid; gap: 0.6rem; flex: 1; }
+.answers .label { display: block; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.answer { font-size: 1.6rem; font-weight: 700; }
+.year-answer { display: flex; align-items: baseline; gap: 0.75rem; }
+.year-answer small { font-size: 0.85rem; font-weight: normal; }
+.year-answer input { width: 6.5rem; font-size: 1.5rem; font-weight: 700; padding: 0.2rem 0.4rem; }
+.mystery { display: none; position: absolute; inset: 0; align-items: center; justify-content: center; font-size: 6rem; font-weight: 800; color: var(--accent); background: #262626; border-radius: 12px; }
+.song-card.hidden-answer .mystery { display: flex; }
+.controls button { flex: 1 1 auto; }
+
+.score-table { width: 100%; border-collapse: collapse; }
+.score-table th, .score-table td { padding: 0.45rem 0.4rem; border-bottom: 1px solid var(--border); text-align: center; }
+.score-table th:first-child, .score-table td:first-child { text-align: left; }
+aside .score-table td:nth-child(2), aside .score-table th:nth-child(2) { text-align: left; }
+.score-table .members { display: block; font-size: 0.75rem; color: var(--muted); }
+.toggle { min-width: 3rem; border-radius: 8px; padding: 0.45rem 0.6rem; }
+.toggle[aria-pressed='true'] { background: var(--accent); color: #000; border-color: var(--accent); }
+.leader td { color: var(--accent); font-weight: 700; }
+
+.history { padding-left: 1.5rem; max-height: 260px; overflow: auto; font-size: 0.9rem; }
+.history li { margin: 0.25rem 0; }

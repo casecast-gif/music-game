@@ -1,0 +1,14 @@
+{
+  "name": "music-game",
+  "version": "1.0.0",
+  "description": "Host/controller for an in-person \"guess the song\" party game powered by a Spotify playlist",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
