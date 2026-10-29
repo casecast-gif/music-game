@@ -149,7 +149,7 @@ export function nextRound(game, trackIds, rng = Math.random) {
     currentTurnId: game.contestants[startingContestantIndex]?.id ?? null,
     turnDeadlineAt: null,
     listenDeadlineAt: null,
-    phase: 'turn',
+    phase: 'listening',
   });
   return trackId;
 }

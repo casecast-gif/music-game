@@ -50,7 +50,6 @@ test('guessMatchCategories returns only a unique matching category', () => {
   assert.deepEqual(guessMatchCategories('Same', { artist: ['Same'], title: ['Same'] }), ['artist', 'title']);
   assert.deepEqual(guessMatchCategories('No match', { artist: ['Beyoncé'], title: ['Halo'] }), []);
 });
-
 test('ISRC response yields earliest first-release-date', () => {
   const data = { recordings: [{ 'first-release-date': '1997-03' }, { 'first-release-date': '1975-10-31' }, {}] };
   assert.equal(yearFromIsrcResponse(data), 1975);

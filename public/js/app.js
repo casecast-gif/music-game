@@ -28,7 +28,7 @@ import {
 } from './game.js';
 import { SpotifyClient, handleRedirect, isLoggedIn, logout, redirectUri, startLogin } from './spotify.js';
 import { MOCK_PLAYLIST_NAME, MOCK_TRACKS, MockSpotifyClient } from './mock-spotify.js';
-import { cleanTitle, formatYear, guessMatchCategories, resolveOriginalYear, yearFromDate } from './year.js';
+import { cleanTitle, formatYear, guessMatchCategories, guessMatches, resolveOriginalYear, yearFromDate } from './year.js';
 
 const KEYS = {
   clientId: 'musicGame.clientId',
@@ -46,6 +46,7 @@ const KEYS = {
 const BROWSER_DEVICE = '__browser__';
 const EMBEDDED_DEVICE = '__spotify_embed__';
 const EMBEDDED_CHANNEL = 'music-game-spotify-player';
+const LISTEN_DURATION_MS = 15_000;
 const ROUND_REVEAL_MS = 6_000;
 const $ = (id) => document.getElementById(id);
 let embeddedPlayerWindow = null;
@@ -115,6 +116,7 @@ const state = {
   turnTimerInterval: null,
   advanceTimeout: null,
   recognition: null,
+  listeningDeadlineAt: null,
   revealedAnswers: { artist: false, title: false, year: false },
   years: loadJson(KEYS.years, {}),
   yearOverrides: loadJson(KEYS.yearOverrides, {}),
@@ -460,7 +462,7 @@ async function pauseCurrent() {
     return;
   }
   const deviceId = selectedDevice === BROWSER_DEVICE ? spotify().deviceId : selectedDevice;
-  if (!deviceId) throw new Error('Choose an active Spotify device before the turn starts.');
+  if (!deviceId) throw new Error('Choose an active Spotify device before the listening clip ends.');
   await spotify().pause(deviceId);
 }
 
@@ -583,7 +585,8 @@ function renderRoundScoring() {
   const allCategoriesSolved = solvedCategories.length === CATEGORIES.length;
   const noSteve = state.game.mode === 'no-steve';
   const status = {
-    turn: activeContestant ? `${activeContestant.name}’s turn — guess the artist, song, or year.` : 'This song is complete.',
+    listening: `Listen to the clip. ${activeContestant?.name ?? 'The first player'} goes first.`,
+    turn: activeContestant ? `${activeContestant.name}’s turn — choose a category or let the game match your guess.` : 'This song is complete.',
     manual: activeContestant
       ? round?.boardActive
         ? `${activeContestant.name}’s turn — run the board or choose Wrong / Pass.`
@@ -682,12 +685,29 @@ function renderGuessControls() {
   const activeContestant = currentTurn(state.game);
   const openCategories = CATEGORIES.filter((category) => !scoredCategories(round, state.game.contestants).includes(category));
   const yearReady = Boolean(round && yearFor(round.trackId)?.year);
+  const categorySelect = $('guess-category');
+  const options = [new Option('Auto-detect category', '')];
+  for (const category of openCategories) {
+    const option = new Option(CATEGORY_LABELS[category], category);
+    if (category === 'year' && !yearReady) {
+      option.disabled = true;
+      option.textContent += round && state.pendingYears.has(round.trackId) ? ' (checking…)': ' (unavailable)';
+    }
+    options.push(option);
+  }
+  const previousCategory = categorySelect.value;
+  categorySelect.replaceChildren(...options);
+  if (options.some((option) => option.value === previousCategory && !option.disabled)) {
+    categorySelect.value = previousCategory;
+  } else {
+    categorySelect.value = '';
+  }
 
   const canAnswer = state.game.mode === 'no-steve'
     && state.roundPhase === 'turn'
     && Boolean(activeContestant)
     && openCategories.some((category) => category !== 'year' || yearReady);
-  $('auto-turn').hidden = state.game.mode !== 'no-steve' || state.roundPhase !== 'turn';
+  $('auto-turn').hidden = state.game.mode !== 'no-steve' || !['listening', 'turn'].includes(state.roundPhase);
   const manualClockActive = state.game.mode === 'im-steve' && Boolean(round?.turnDeadlineAt);
   $('manual-clock-controls').hidden = state.game.mode !== 'im-steve';
   $('start-manual-clock').disabled = !activeContestant
@@ -698,6 +718,7 @@ function renderGuessControls() {
     $('manual-clock-display').textContent = String(manualClockDisplaySeconds(round.turnDeadlineAt));
   }
   $('guess-form').hidden = state.roundPhase !== 'turn' || !activeContestant;
+  categorySelect.disabled = !canAnswer;
   $('guess-text').disabled = !canAnswer;
   $('submit-guess').disabled = !canAnswer;
   $('speak-guess').disabled = !canAnswer || Boolean(state.recognition);
@@ -707,7 +728,11 @@ function renderGuessControls() {
   $('play-pause').disabled = state.game.mode === 'no-steve' && state.roundPhase === 'turn';
   $('replay').disabled = state.game.mode === 'no-steve' && state.roundPhase === 'turn';
   $('next').textContent = state.game.mode === 'no-steve' ? 'Skip song' : '⏭ Next song';
-  $('turn-progress').max = guessTimeLimitSeconds(currentRound(state.game));
+  if (state.roundPhase === 'listening') {
+    $('turn-progress').max = LISTEN_DURATION_MS / 1000;
+  } else {
+    $('turn-progress').max = guessTimeLimitSeconds(currentRound(state.game));
+  }
   $('turn-countdown').textContent = '';
 }
 
@@ -730,6 +755,7 @@ function clearAutomationTimers() {
   stopRoundClock();
   if (state.advanceTimeout) clearTimeout(state.advanceTimeout);
   state.advanceTimeout = null;
+  state.listeningDeadlineAt = null;
   stopVoiceRecognition();
 }
 
@@ -742,6 +768,18 @@ function updateRoundClock() {
     if (round.turnDeadlineAt <= now) {
       stopRoundClock();
       expireManualTurn();
+    }
+    return;
+  }
+
+  if (state.roundPhase === 'listening' && state.listeningDeadlineAt) {
+    const remaining = Math.max(0, state.listeningDeadlineAt - now);
+    $('turn-progress').max = LISTEN_DURATION_MS / 1000;
+    $('turn-progress').value = Math.ceil(remaining / 1000);
+    $('turn-countdown').textContent = `Listen: ${Math.ceil(remaining / 1000)}s`;
+    if (remaining === 0) {
+      stopRoundClock();
+      beginPlayerTurn().catch(reportError);
     }
     return;
   }
@@ -784,6 +822,7 @@ function startTurnClock({ resume = false } = {}) {
   if (!round || !currentTurn(state.game)) return finishRound();
   stopVoiceRecognition();
   state.roundPhase = 'turn';
+  state.listeningDeadlineAt = null;
   round.phase = 'turn';
   round.listenDeadlineAt = null;
   round.turnDeadlineAt = resume && round.turnDeadlineAt > Date.now()
@@ -793,6 +832,28 @@ function startTurnClock({ resume = false } = {}) {
   saveGame();
   renderGame();
   startRoundClock();
+}
+
+function startListeningPhase(deadlineAt = Date.now() + LISTEN_DURATION_MS) {
+  const round = currentRound(state.game);
+  if (!round) return;
+  state.roundPhase = 'listening';
+  state.listeningDeadlineAt = deadlineAt;
+  round.phase = 'listening';
+  round.listenDeadlineAt = deadlineAt;
+  round.turnDeadlineAt = null;
+  saveGame();
+  renderGame();
+  startRoundClock();
+}
+
+async function beginPlayerTurn() {
+  try {
+    await pauseCurrent();
+  } catch (err) {
+    reportError(err);
+  }
+  startTurnClock();
 }
 
 function showGuessFeedback(message, correct = null) {
@@ -820,6 +881,22 @@ function matchingGuessCategories(trackId, round, guess) {
   return guessMatchCategories(guess, answers);
 }
 
+function guessIsCorrect(trackId, category, guess) {
+  const track = state.tracks.get(trackId);
+  if (!track) return false;
+  if (category === 'artist') {
+    return guessMatches(guess, [...track.artists, track.artists.join(', ')]);
+  }
+  if (category === 'title') {
+    return guessMatches(guess, [track.title, displayTitle(track)]);
+  }
+  if (category === 'year') {
+    const year = yearFor(trackId)?.year;
+    return year != null && guessMatches(guess, [String(year), formatYear(year)]);
+  }
+  return false;
+}
+
 function finishRound() {
   stopRoundClock();
   stopVoiceRecognition();
@@ -832,6 +909,7 @@ function finishRound() {
   round.listenDeadlineAt = null;
   round.phase = 'reveal';
   state.roundPhase = 'reveal';
+  state.listeningDeadlineAt = null;
   revealAllAnswers();
   saveGame();
   renderGame();
@@ -935,6 +1013,7 @@ function submitGuess(event) {
   const roundIndex = state.game.rounds.length - 1;
   const contestant = currentTurn(state.game);
   const round = currentRound(state.game);
+  const selectedCategory = $('guess-category').value;
   const guess = $('guess-text').value.trim();
   if (!contestant || !round || !guess) return;
   if (round.turnDeadlineAt && round.turnDeadlineAt <= Date.now()) {
@@ -942,9 +1021,11 @@ function submitGuess(event) {
     return;
   }
   stopVoiceRecognition();
-  const matchingCategories = matchingGuessCategories(round.trackId, round, guess);
-  const category = matchingCategories.length === 1 ? matchingCategories[0] : null;
-  const isCorrect = category !== null;
+  const matchingCategories = selectedCategory ? [] : matchingGuessCategories(round.trackId, round, guess);
+  const category = selectedCategory || (matchingCategories.length === 1 ? matchingCategories[0] : null);
+  const isCorrect = selectedCategory
+    ? guessIsCorrect(round.trackId, selectedCategory, guess)
+    : matchingCategories.length === 1;
   resolveGuess(state.game, roundIndex, contestant.id, category, isCorrect);
   if (isCorrect) {
     state.revealedAnswers[category] = true;
@@ -1097,10 +1178,10 @@ async function nextSong() {
   prefetchYear(trackId);
   if (state.game.deck[0]) prefetchYear(state.game.deck[0]);
   await playCurrent();
-  startTurnClock();
+  startListeningPhase();
   setStatus(state.spotifyApiMode === 'mock'
-    ? 'Mock round (silent playback). The first player can guess now.'
-    : 'Song playing. The first player can guess now.');
+    ? `Mock round (silent playback). The first turn follows in ${LISTEN_DURATION_MS / 1000} seconds.`
+    : `Listen to the song for ${LISTEN_DURATION_MS / 1000} seconds. The first turn follows.`);
 }
 
 async function enterGame({ fresh }) {
@@ -1147,8 +1228,9 @@ async function enterGame({ fresh }) {
         setStatus('Game resumed — press Play to continue the current song.');
       }
     } else if (round.phase === 'listening') {
-      startTurnClock({ resume: true });
-      setStatus(`Game resumed — ${currentTurn(state.game)?.name}’s turn (${guessTimeLimitSeconds(round)}-second limit).`);
+      const deadlineAt = round.listenDeadlineAt > Date.now() ? round.listenDeadlineAt : Date.now();
+      startListeningPhase(deadlineAt);
+      setStatus('Game resumed during the listening clip.');
     } else if (['reveal', 'game-over'].includes(round.phase)
       || !currentTurn(state.game)
       || scoredCategories(round, state.game.contestants).length === CATEGORIES.length) {

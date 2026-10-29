@@ -153,8 +153,10 @@
                 <span id="turn-countdown" aria-live="polite"></span>
               </div>
               <form id="guess-form" class="guess-form">
-                <label for="guess-text">Your guess (artist, song, or year)</label>
-                <input id="guess-text" autocomplete="off" placeholder="Type an artist, song, or year" required />
+                <label for="guess-category">Choose a category or auto-match</label>
+                <select id="guess-category"></select>
+                <label for="guess-text">Your guess</label>
+                <input id="guess-text" autocomplete="off" placeholder="Type or use voice" required />
                 <div class="guess-actions">
                   <button id="speak-guess" type="button" class="secondary">🎙 Speak guess</button>
                   <button id="pass-guess" type="button" class="secondary">Pass</button>

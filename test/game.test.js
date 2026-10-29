@@ -99,7 +99,7 @@ test('nextRound plays every song once before repeating', () => {
   assert.equal(nextRound(createGame(), []), null);
 });
 
-test('nextRound rotates the starting contestant and starts with an available turn', () => {
+test('nextRound rotates the starting contestant and begins with a listening phase', () => {
   const game = createGame();
   const a = createContestant('A');
   const b = createContestant('B');
@@ -108,7 +108,7 @@ test('nextRound rotates the starting contestant and starts with an available tur
 
   nextRound(game, ['x', 'y']);
   assert.equal(currentTurn(game).id, a.id);
-  assert.equal(game.rounds[0].phase, 'turn');
+  assert.equal(game.rounds[0].phase, 'listening');
   assert.equal(guessTimeLimitSeconds(game.rounds[0]), 60);
   game.rounds[0].turnDeadlineAt = Date.now() + 30_000;
   const saved = deserializeGame(serializeGame(game));
