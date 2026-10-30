@@ -12,6 +12,7 @@ import {
   currentRound,
   currentTurn,
   deserializeGame,
+  extendDeck,
   isTeam,
   nextRound,
   parsePlaylistId,
@@ -28,6 +29,7 @@ import {
 } from './game.js';
 import { SpotifyClient, handleRedirect, isLoggedIn, logout, redirectUri, startLogin } from './spotify.js';
 import { MOCK_PLAYLIST_NAME, MOCK_TRACKS, MockSpotifyClient } from './mock-spotify.js';
+import { PlaylistLoader } from './playlist.js';
 import { cleanTitle, formatYear, guessMatchCategories, guessMatches, resolveOriginalYear, yearFromDate } from './year.js';
 
 const KEYS = {
@@ -46,7 +48,6 @@ const KEYS = {
 const BROWSER_DEVICE = '__browser__';
 const EMBEDDED_DEVICE = '__spotify_embed__';
 const EMBEDDED_CHANNEL = 'music-game-spotify-player';
-const LISTEN_DURATION_MS = 15_000;
 const ROUND_REVEAL_MS = 6_000;
 const $ = (id) => document.getElementById(id);
 let embeddedPlayerWindow = null;
@@ -68,7 +69,13 @@ function readPlaylistCache(playlistId) {
   if (
     cache?.playlistId === playlistId &&
     Array.isArray(cache.tracks) &&
-    cache.tracks.every((track) => track && typeof track.id === 'string' && typeof track.uri === 'string')
+    cache.tracks.every((track) => track && typeof track.id === 'string' && typeof track.uri === 'string') &&
+    (cache.remainingOffsets === undefined || (
+      Number.isSafeInteger(cache.total) && cache.total >= 0 &&
+      Array.isArray(cache.remainingOffsets) &&
+      cache.remainingOffsets.every((offset) => Number.isSafeInteger(offset) && offset >= 0 && offset < cache.total && offset % 50 === 0) &&
+      new Set(cache.remainingOffsets).size === cache.remainingOffsets.length
+    ))
   ) return cache;
   return null;
 }
@@ -82,6 +89,8 @@ function loadMockPlaylist() {
 }
 
 function setSpotifyApiMode(mode, { persist = true } = {}) {
+  if (state.playlistLoader) state.playlistLoader.cancelled = true;
+  state.playlistLoader = null;
   state.spotifyApiMode = mode === 'live' ? 'live' : 'mock';
   if (persist) localStorage.setItem(KEYS.spotifyApiMode, state.spotifyApiMode);
   state.spotify = null;
@@ -126,7 +135,6 @@ const state = {
   turnTimerInterval: null,
   advanceTimeout: null,
   recognition: null,
-  listeningDeadlineAt: null,
   revealedAnswers: { artist: false, title: false, year: false },
   years: loadJson(KEYS.years, {}),
   yearOverrides: loadJson(KEYS.yearOverrides, {}),
@@ -136,6 +144,7 @@ const state = {
   playerPromise: null,
   selectedDeviceId: localStorage.getItem(KEYS.deviceId) ?? '',
   loadingPlaylist: false,
+  playlistLoader: null,
 };
 
 function saveGame() {
@@ -213,7 +222,7 @@ function renderSetup() {
     info.textContent = mock
       ? 'Mock sample songs are not loaded.'
       : loggedIn
-        ? 'Click Load playlist to request songs from Spotify.'
+        ? 'Click Load playlist to request up to 150 songs from randomized playlist pages.'
         : 'Log in with Spotify, then click Load playlist.';
   }
 
@@ -264,31 +273,24 @@ async function loadPlaylist() {
   state.loadingPlaylist = true;
   renderSetup();
   setStatus('Loading playlist…');
-  const client = spotify();
-  let info = null;
-  let name;
-  let tracks;
+  const loader = getPlaylistLoader(playlistId);
   try {
-    try {
-      info = await client.getPlaylistInfo(playlistId);
-    } catch (err) {
-      if (err.status === 429) throw err;
-      console.warn('Could not check the playlist snapshot; loading tracks anyway.', err);
-    }
-    const cache = readPlaylistCache(playlistId);
-    if (info?.snapshotId && cache?.snapshotId === info.snapshotId) {
-      name = info.name ?? cache.name;
-      tracks = cache.tracks;
-    } else {
-      tracks = await client.getPlaylistTracks(playlistId, {
-        onProgress: (loaded, total) => {
-          setStatus(`Loading playlist… ${loaded.toLocaleString()} / ${total.toLocaleString()}`);
-          $('playlist-state').textContent = `Loading… ${loaded.toLocaleString()} / ${total.toLocaleString()}`;
-        },
-      });
-      name = info?.name ?? null;
-    }
+    const cache = await loader.load({
+      onProgress: (loaded, total) => {
+        if (state.playlistLoader !== loader) return;
+        setStatus(`Loading playlist batch… ${loaded.toLocaleString()} / ${total.toLocaleString()}`);
+        $('playlist-state').textContent = `Loading… ${loaded.toLocaleString()} / ${total.toLocaleString()}`;
+      },
+    });
+    if (state.playlistLoader !== loader) return;
+    applyPlaylistCache(cache);
+    if (!cache.tracks.length) throw new Error('No playable songs found in this batch. Click Load playlist to try another batch.');
+    $('setup-settings').open = false;
+    setStatus(loader.hasMore
+      ? `Playlist ready: ${state.tracks.size.toLocaleString()} songs cached. More load during play below 25 unplayed songs.`
+      : `Playlist ready: ${state.tracks.size.toLocaleString()} songs cached (all pages loaded).`);
   } catch (err) {
+    if (state.playlistLoader !== loader) return;
     if (err.status === 403) {
       throw new Error('Spotify blocked this playlist (403). Log in as the playlist owner/collaborator or use a copy saved to your account.');
     }
@@ -297,26 +299,53 @@ async function loadPlaylist() {
     state.loadingPlaylist = false;
     renderSetup();
   }
-  if (!tracks.length) throw new Error('No playable songs found in that playlist');
-  state.playlistName = name;
-  state.tracks = new Map(tracks.map((t) => [t.id, t]));
-  let cached = true;
-  try {
-    localStorage.setItem(KEYS.playlistCache, JSON.stringify({
-      playlistId,
-      name,
-      snapshotId: info?.snapshotId ?? null,
-      tracks: [...state.tracks.values()],
-    }));
-    $('setup-settings').open = false;
-  } catch (err) {
-    cached = false;
-    console.warn('Could not cache the loaded playlist', err);
+}
+
+function applyPlaylistCache(cache) {
+  state.playlistName = typeof cache.name === 'string' ? cache.name : null;
+  state.tracks = new Map(cache.tracks.map((track) => [track.id, track]));
+}
+
+function getPlaylistLoader(playlistId) {
+  if (state.playlistLoader?.playlistId === playlistId && state.playlistLoader.client.clientId === state.clientId) {
+    return state.playlistLoader;
   }
-  setStatus(cached
-    ? `Playlist ready: ${state.tracks.size.toLocaleString()} songs`
-    : 'Playlist loaded, but could not be cached; it will need reloading next time.');
-  renderSetup();
+  if (state.playlistLoader) state.playlistLoader.cancelled = true;
+  const loader = new PlaylistLoader(spotify(), playlistId, {
+    cache: readPlaylistCache(playlistId),
+    saveCache: (cache) => {
+      if (state.playlistLoader !== loader || state.spotifyApiMode !== 'live') return;
+      applyPlaylistCache(cache);
+      if (!$('game').hidden && state.game.playlistId === playlistId) {
+        extendDeck(state.game, [...state.tracks.keys()]);
+        saveGame();
+        renderGame();
+      }
+      try {
+        localStorage.setItem(KEYS.playlistCache, JSON.stringify(cache));
+      } catch (err) {
+        throw new Error(`Songs loaded, but playlist progress could not be saved in this browser: ${err.message}`, { cause: err });
+      }
+    },
+  });
+  state.playlistLoader = loader;
+  return loader;
+}
+
+function unplayedSongCount() {
+  const played = new Set(state.game.rounds.map((round) => round.trackId));
+  return [...state.tracks.keys()].filter((id) => !played.has(id)).length;
+}
+
+async function topUpPlaylist() {
+  const loader = state.playlistLoader;
+  if (state.spotifyApiMode !== 'live' || !loader || $('game').hidden || state.roundPhase === 'game-over') return;
+  try {
+    await loader.loadMore(unplayedSongCount());
+  } catch (err) {
+    if (state.playlistLoader !== loader) return;
+    throw new Error(`Automatic song loading paused: ${err.message} Cached songs remain available; use Load playlist to retry.`, { cause: err });
+  }
 }
 
 // ---------- Playback ----------
@@ -477,19 +506,6 @@ async function playCurrent() {
   }
 }
 
-async function pauseCurrent() {
-  const selectedDevice = $('device').value;
-  if (selectedDevice === EMBEDDED_DEVICE) {
-    if (!postEmbeddedMessage('pause')) {
-      throw new Error('The Spotify player window is not ready to pause playback.');
-    }
-    return;
-  }
-  const deviceId = selectedDevice === BROWSER_DEVICE ? spotify().deviceId : selectedDevice;
-  if (!deviceId) throw new Error('Choose an active Spotify device before the listening clip ends.');
-  await spotify().pause(deviceId);
-}
-
 // ---------- Years ----------
 
 function yearFor(trackId) {
@@ -609,7 +625,6 @@ function renderRoundScoring() {
   const allCategoriesSolved = solvedCategories.length === CATEGORIES.length;
   const noSteve = state.game.mode === 'no-steve';
   const status = {
-    listening: `Listen to the clip. ${activeContestant?.name ?? 'The first player'} goes first.`,
     turn: activeContestant ? `${activeContestant.name}’s turn — choose a category or let the game match your guess.` : 'This song is complete.',
     manual: activeContestant
       ? round?.boardActive
@@ -731,7 +746,7 @@ function renderGuessControls() {
     && state.roundPhase === 'turn'
     && Boolean(activeContestant)
     && openCategories.some((category) => category !== 'year' || yearReady);
-  $('auto-turn').hidden = state.game.mode !== 'no-steve' || !['listening', 'turn'].includes(state.roundPhase);
+  $('auto-turn').hidden = state.game.mode !== 'no-steve' || state.roundPhase !== 'turn';
   const manualClockActive = state.game.mode === 'im-steve' && Boolean(round?.turnDeadlineAt);
   $('manual-clock-controls').hidden = state.game.mode !== 'im-steve';
   $('start-manual-clock').disabled = !activeContestant
@@ -752,11 +767,7 @@ function renderGuessControls() {
   $('play-pause').disabled = state.game.mode === 'no-steve' && state.roundPhase === 'turn';
   $('replay').disabled = state.game.mode === 'no-steve' && state.roundPhase === 'turn';
   $('next').textContent = state.game.mode === 'no-steve' ? 'Skip song' : '⏭ Next song';
-  if (state.roundPhase === 'listening') {
-    $('turn-progress').max = LISTEN_DURATION_MS / 1000;
-  } else {
-    $('turn-progress').max = guessTimeLimitSeconds(currentRound(state.game));
-  }
+  $('turn-progress').max = guessTimeLimitSeconds(currentRound(state.game));
   $('turn-countdown').textContent = '';
 }
 
@@ -779,7 +790,6 @@ function clearAutomationTimers() {
   stopRoundClock();
   if (state.advanceTimeout) clearTimeout(state.advanceTimeout);
   state.advanceTimeout = null;
-  state.listeningDeadlineAt = null;
   stopVoiceRecognition();
 }
 
@@ -792,18 +802,6 @@ function updateRoundClock() {
     if (round.turnDeadlineAt <= now) {
       stopRoundClock();
       expireManualTurn();
-    }
-    return;
-  }
-
-  if (state.roundPhase === 'listening' && state.listeningDeadlineAt) {
-    const remaining = Math.max(0, state.listeningDeadlineAt - now);
-    $('turn-progress').max = LISTEN_DURATION_MS / 1000;
-    $('turn-progress').value = Math.ceil(remaining / 1000);
-    $('turn-countdown').textContent = `Listen: ${Math.ceil(remaining / 1000)}s`;
-    if (remaining === 0) {
-      stopRoundClock();
-      beginPlayerTurn().catch(reportError);
     }
     return;
   }
@@ -846,7 +844,6 @@ function startTurnClock({ resume = false } = {}) {
   if (!round || !currentTurn(state.game)) return finishRound();
   stopVoiceRecognition();
   state.roundPhase = 'turn';
-  state.listeningDeadlineAt = null;
   round.phase = 'turn';
   round.listenDeadlineAt = null;
   round.turnDeadlineAt = resume && round.turnDeadlineAt > Date.now()
@@ -856,28 +853,6 @@ function startTurnClock({ resume = false } = {}) {
   saveGame();
   renderGame();
   startRoundClock();
-}
-
-function startListeningPhase(deadlineAt = Date.now() + LISTEN_DURATION_MS) {
-  const round = currentRound(state.game);
-  if (!round) return;
-  state.roundPhase = 'listening';
-  state.listeningDeadlineAt = deadlineAt;
-  round.phase = 'listening';
-  round.listenDeadlineAt = deadlineAt;
-  round.turnDeadlineAt = null;
-  saveGame();
-  renderGame();
-  startRoundClock();
-}
-
-async function beginPlayerTurn() {
-  try {
-    await pauseCurrent();
-  } catch (err) {
-    reportError(err);
-  }
-  startTurnClock();
 }
 
 function showGuessFeedback(message, correct = null) {
@@ -933,7 +908,6 @@ function finishRound() {
   round.listenDeadlineAt = null;
   round.phase = 'reveal';
   state.roundPhase = 'reveal';
-  state.listeningDeadlineAt = null;
   revealAllAnswers();
   saveGame();
   renderGame();
@@ -1176,6 +1150,10 @@ async function nextSong() {
   clearAutomationTimers();
   state.roundPhase = 'idle';
   spotify().activate();
+  if (!unplayedSongCount() && state.playlistLoader?.hasMore && state.spotifyApiMode === 'live') {
+    await topUpPlaylist();
+    if (!unplayedSongCount()) throw new Error('No unplayed songs are cached. Use Load playlist to retry loading more before repeating songs.');
+  }
   const trackIds = [...state.tracks.keys()];
   const trackId = nextRound(state.game, trackIds);
   if (!trackId) throw new Error('The playlist is empty');
@@ -1195,6 +1173,7 @@ async function nextSong() {
     setStatus(state.spotifyApiMode === 'mock'
       ? 'Mock song selected (silent). Use the scoring controls to judge each guess.'
       : 'Song playing. Use the scoring controls to judge each guess.');
+    void topUpPlaylist().catch(reportError);
     return;
   }
   saveGame();
@@ -1202,10 +1181,11 @@ async function nextSong() {
   prefetchYear(trackId);
   if (state.game.deck[0]) prefetchYear(state.game.deck[0]);
   await playCurrent();
-  startListeningPhase();
+  startTurnClock();
   setStatus(state.spotifyApiMode === 'mock'
-    ? `Mock round (silent playback). The first turn follows in ${LISTEN_DURATION_MS / 1000} seconds.`
-    : `Listen to the song for ${LISTEN_DURATION_MS / 1000} seconds. The first turn follows.`);
+    ? 'Mock round (silent playback). Guess now; playback continues until the next song.'
+    : 'Guess now. The song keeps playing until the next song starts.');
+  void topUpPlaylist().catch(reportError);
 }
 
 async function enterGame({ fresh }) {
@@ -1251,19 +1231,19 @@ async function enterGame({ fresh }) {
         renderGame();
         setStatus('Game resumed — press Play to continue the current song.');
       }
-    } else if (round.phase === 'listening') {
-      const deadlineAt = round.listenDeadlineAt > Date.now() ? round.listenDeadlineAt : Date.now();
-      startListeningPhase(deadlineAt);
-      setStatus('Game resumed during the listening clip.');
-    } else if (['reveal', 'game-over'].includes(round.phase)
-      || !currentTurn(state.game)
-      || scoredCategories(round, state.game.contestants).length === CATEGORIES.length) {
-      finishRound();
     } else {
-      startTurnClock({ resume: true });
-      setStatus(`Game resumed — ${currentTurn(state.game)?.name}’s turn (${guessTimeLimitSeconds(round)}-second limit).`);
+      await playCurrent();
+      if (['reveal', 'game-over'].includes(round.phase)
+        || !currentTurn(state.game)
+        || scoredCategories(round, state.game.contestants).length === CATEGORIES.length) {
+        finishRound();
+      } else {
+        startTurnClock({ resume: true });
+        setStatus(`Game resumed — ${currentTurn(state.game)?.name}’s turn (${guessTimeLimitSeconds(round)}-second limit). Music continues playing.`);
+      }
     }
   }
+  void topUpPlaylist().catch(reportError);
 }
 
 // ---------- Events ----------
@@ -1315,6 +1295,8 @@ on('spotify-form', 'submit', async (e) => {
 });
 
 on('logout', 'click', () => {
+  if (state.playlistLoader) state.playlistLoader.cancelled = true;
+  state.playlistLoader = null;
   logout();
   state.tracks = new Map();
   state.playlistName = null;
@@ -1521,8 +1503,8 @@ document.addEventListener('keydown', (e) => {
       const playlistId = parsePlaylistId(state.playlistInput);
       const cache = playlistId ? readPlaylistCache(playlistId) : null;
       if (cache) {
-        state.playlistName = typeof cache.name === 'string' ? cache.name : null;
-        state.tracks = new Map(cache.tracks.map((track) => [track.id, track]));
+        applyPlaylistCache(cache);
+        getPlaylistLoader(playlistId);
         if (state.clientId && isLoggedIn()) $('setup-settings').open = false;
         setStatus(`Playlist ready from cache: ${state.tracks.size.toLocaleString()} songs`);
         renderSetup();

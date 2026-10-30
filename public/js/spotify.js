@@ -293,6 +293,16 @@ export class SpotifyClient {
     return { name: data?.name ?? null, snapshotId: data?.snapshot_id ?? null };
   }
 
+  async getPlaylistPage(playlistId, query) {
+    const page = await this.api(`/playlists/${playlistId}/items`, {
+      query: { additional_types: 'track', ...query },
+    });
+    return {
+      ...page,
+      tracks: Array.isArray(page?.items) ? page.items.map(normalizePlaylistItem).filter(Boolean) : [],
+    };
+  }
+
   /** Loads playlist pages sequentially to avoid request bursts in development mode. */
   async getPlaylistTracks(playlistId, { onProgress = () => {} } = {}) {
     const tracks = [];

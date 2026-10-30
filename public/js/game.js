@@ -131,6 +131,13 @@ export function buildDeck(game, trackIds, rng = Math.random) {
   return game;
 }
 
+export function extendDeck(game, trackIds, rng = Math.random) {
+  const known = new Set([...game.deck, ...game.rounds.map((round) => round.trackId)]);
+  const added = [...new Set(trackIds)].filter((id) => !known.has(id));
+  if (added.length) game.deck = shuffle([...game.deck, ...added], rng);
+  return game;
+}
+
 /**
  * Draws the next random track and starts a new round for it.
  * Returns the track id, or null when the playlist is empty.
@@ -149,7 +156,7 @@ export function nextRound(game, trackIds, rng = Math.random) {
     currentTurnId: game.contestants[startingContestantIndex]?.id ?? null,
     turnDeadlineAt: null,
     listenDeadlineAt: null,
-    phase: 'listening',
+    phase: game.mode === 'no-steve' ? 'turn' : 'manual',
   });
   return trackId;
 }
@@ -343,8 +350,10 @@ export function deserializeGame(json) {
             boardActive: r.boardActive === true,
             currentTurnId,
             turnDeadlineAt: Number.isSafeInteger(r.turnDeadlineAt) && r.turnDeadlineAt > 0 ? r.turnDeadlineAt : null,
-            listenDeadlineAt: Number.isSafeInteger(r.listenDeadlineAt) && r.listenDeadlineAt > 0 ? r.listenDeadlineAt : null,
-            phase: ['listening', 'turn', 'manual', 'reveal', 'game-over'].includes(r.phase) ? r.phase : null,
+            listenDeadlineAt: data.mode === 'no-steve' ? null
+              : Number.isSafeInteger(r.listenDeadlineAt) && r.listenDeadlineAt > 0 ? r.listenDeadlineAt : null,
+            phase: data.mode === 'no-steve' && r.phase === 'listening' ? 'turn'
+              : ['listening', 'turn', 'manual', 'reveal', 'game-over'].includes(r.phase) ? r.phase : null,
           };
         }),
     };

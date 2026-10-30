@@ -99,7 +99,7 @@ test('nextRound plays every song once before repeating', () => {
   assert.equal(nextRound(createGame(), []), null);
 });
 
-test('nextRound rotates the starting contestant and begins with a listening phase', () => {
+test('No Steve rotates the starting contestant and begins with guessing immediately', () => {
   const game = createGame();
   const a = createContestant('A');
   const b = createContestant('B');
@@ -108,7 +108,8 @@ test('nextRound rotates the starting contestant and begins with a listening phas
 
   nextRound(game, ['x', 'y']);
   assert.equal(currentTurn(game).id, a.id);
-  assert.equal(game.rounds[0].phase, 'listening');
+  assert.equal(game.rounds[0].phase, 'turn');
+  assert.equal(game.rounds[0].listenDeadlineAt, null);
   assert.equal(guessTimeLimitSeconds(game.rounds[0]), 60);
   game.rounds[0].turnDeadlineAt = Date.now() + 30_000;
   const saved = deserializeGame(serializeGame(game));
@@ -121,6 +122,29 @@ test('nextRound rotates the starting contestant and begins with a listening phas
   assert.equal(currentTurn(game).id, b.id);
   assert.equal(guessTimeLimitSeconds(game.rounds[1]), 60);
   assert.equal(game.rounds[1].turnDeadlineAt, null);
+});
+
+test("I'm Steve rounds retain the manual scoring phase", () => {
+  const game = createGame({ mode: 'im-steve' });
+  addContestant(game, createContestant('A'));
+  nextRound(game, ['x']);
+  assert.equal(currentRound(game).phase, 'manual');
+  assert.equal(currentRound(game).listenDeadlineAt, null);
+});
+
+test('saved No Steve listening phases resume as guessing turns without a listening deadline', () => {
+  const game = createGame();
+  addContestant(game, createContestant('A'));
+  nextRound(game, ['x']);
+  const round = currentRound(game);
+  round.phase = 'listening';
+  round.listenDeadlineAt = Date.now() + 15_000;
+  const restored = deserializeGame(serializeGame(game));
+  assert.equal(currentRound(restored).phase, 'turn');
+  assert.equal(currentRound(restored).listenDeadlineAt, null);
+  assert.equal(currentRound(restored).turnDeadlineAt, null);
+  assert.equal(currentTurn(restored).id, currentTurn(game).id);
+  assert.equal(guessTimeLimitSeconds(currentRound(restored)), 60);
 });
 
 test('scores count artist, title and year separately', () => {
