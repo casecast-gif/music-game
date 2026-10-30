@@ -15,6 +15,11 @@ test('mock Spotify client supports playlist and playback flows without network r
   });
 
   const client = new MockSpotifyClient('unused');
+  const originalVolume = client.volume;
+  const restoreVolume = await client.lowerVolumeForVoice();
+  assert.equal(client.volume, originalVolume * 0.2);
+  await restoreVolume();
+  assert.equal(client.volume, originalVolume);
   const progress = [];
   assert.match(await client.getPlaylistName('playlist-id'), /mock/i);
   const tracks = await client.getPlaylistTracks('playlist-id', {

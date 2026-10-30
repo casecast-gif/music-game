@@ -29,6 +29,7 @@ import {
 import { SpotifyClient, handleRedirect, isLoggedIn, logout, redirectUri, startLogin } from './spotify.js';
 import { MOCK_PLAYLIST_NAME, MOCK_TRACKS, MockSpotifyClient } from './mock-spotify.js';
 import { PlaylistLoader } from './playlist.js';
+import { VoiceGuessSession } from './voice.js';
 import { cleanTitle, formatYear, guessMatchCategories, guessMatches, resolveOriginalYear, yearFromDate } from './year.js';
 
 const KEYS = {
@@ -87,7 +88,9 @@ function loadMockPlaylist() {
   setStatus('Mock samples loaded. No external API requests were made.');
 }
 
-function setSpotifyApiMode(mode, { persist = true } = {}) {
+async function setSpotifyApiMode(mode, { persist = true } = {}) {
+  stopVoiceRecognition();
+  await state.voiceRestoration;
   if (state.playlistLoader) state.playlistLoader.cancelled = true;
   state.playlistLoader = null;
   state.spotifyApiMode = mode === 'live' ? 'live' : 'mock';
@@ -134,6 +137,7 @@ const state = {
   turnTimerInterval: null,
   advanceTimeout: null,
   recognition: null,
+  voiceRestoration: Promise.resolve(),
   revealedAnswers: { artist: false, title: false, year: false },
   years: loadJson(KEYS.years, {}),
   yearOverrides: loadJson(KEYS.yearOverrides, {}),
@@ -764,7 +768,8 @@ function renderGuessControls() {
   categorySelect.disabled = !canAnswer;
   $('guess-text').disabled = !canAnswer;
   $('submit-guess').disabled = !canAnswer;
-  $('speak-guess').disabled = !canAnswer || Boolean(state.recognition);
+  $('speak-guess').disabled = !canAnswer || Boolean(state.recognition?.isCapturing);
+  $('speak-guess').textContent = state.recognition?.isCapturing ? 'Listening…' : '🎙 Speak guess';
   $('speak-guess').hidden = !speechRecognitionAvailable();
   $('pass-guess').disabled = state.roundPhase !== 'turn' || !activeContestant;
   $('next').disabled = state.roundPhase === 'game-over';
@@ -780,13 +785,12 @@ function stopRoundClock() {
 }
 
 function stopVoiceRecognition() {
-  const recognition = state.recognition;
-  if (!recognition) return;
+  const session = state.recognition;
+  if (!session) return;
   state.recognition = null;
-  recognition.onresult = null;
-  recognition.onerror = null;
-  recognition.onend = null;
-  recognition.abort();
+  state.voiceRestoration = session.stop().catch((err) => {
+    reportError(new Error(`Could not restore the song volume: ${err.message} Check the speaker volume manually.`, { cause: err }));
+  });
 }
 
 function clearAutomationTimers() {
@@ -1050,40 +1054,63 @@ function speechRecognitionAvailable() {
   return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
 }
 
-function startVoiceGuess() {
+async function startVoiceGuess() {
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) {
     throw new Error('Voice recognition is not available in this browser. Type your guess instead.');
   }
-  if (state.recognition) return;
-  const recognition = new Recognition();
-  recognition.lang = 'en-US';
-  recognition.continuous = false;
-  recognition.interimResults = false;
-  recognition.maxAlternatives = 1;
-  state.recognition = recognition;
-  $('speak-guess').disabled = true;
-  setStatus('Listening for your guess…');
-  recognition.onresult = (event) => {
-    if (state.roundPhase !== 'turn' || !currentTurn(state.game)) return;
-    const transcript = event.results?.[0]?.[0]?.transcript?.trim();
-    if (transcript) {
+  if (state.roundPhase !== 'turn' || !currentTurn(state.game) || state.recognition?.isCapturing) return;
+  stopVoiceRecognition();
+  const previousRestoration = state.voiceRestoration;
+  const client = spotify();
+  const selectedDevice = $('device').value;
+  const deviceId = selectedDevice === BROWSER_DEVICE ? client.deviceId : selectedDevice;
+  let volumeWarning = '';
+  const session = new VoiceGuessSession(Recognition, {
+    lowerVolume: async () => {
+      await previousRestoration;
+      if (session.closed) return async () => {};
+      if (deviceId === EMBEDDED_DEVICE) throw new Error('The preview player does not support volume control.');
+      return client.lowerVolumeForVoice(deviceId);
+    },
+    onTranscript: (transcript) => {
+      if (state.recognition !== session || state.roundPhase !== 'turn') return;
       $('guess-text').value = transcript;
-      setStatus('Voice transcript ready. Review it, then submit your guess.');
-    }
-  };
-  recognition.onerror = (event) => {
-    setStatus(`Voice recognition failed (${event.error}). Type your guess instead.`, true);
-  };
-  recognition.onend = () => {
-    if (state.recognition === recognition) state.recognition = null;
-    renderGuessControls();
-  };
+      setStatus(`${session.isCapturing ? 'Listening for up to 15 seconds.' : 'Voice transcript ready.'} Review your guess and submit when ready.${volumeWarning}`, Boolean(volumeWarning));
+    },
+    onListeningEnd: (transcript) => {
+      if (state.recognition !== session) return;
+      renderGuessControls();
+      setStatus(`${transcript ? 'Voice transcript ready. Review it, then submit your guess.' : 'No speech captured. Type your guess or try Speak guess again.'}${volumeWarning || ' Music stays lowered until this turn ends.'}`, Boolean(volumeWarning));
+    },
+    onNoSpeech: () => {
+      if (state.recognition === session) setStatus(`No speech heard yet. Still listening; speak clearly toward the microphone.${volumeWarning}`, Boolean(volumeWarning));
+    },
+    onError: (err) => {
+      if (state.recognition !== session) return;
+      stopVoiceRecognition();
+      renderGuessControls();
+      reportError(err);
+    },
+    onVolumeError: (err) => {
+      volumeWarning = ` Music could not be lowered: ${err.message} Use the speaker volume controls.`;
+      console.error(err);
+      if (state.recognition === session) setStatus(`Listening for your guess.${volumeWarning}`, true);
+    },
+  });
+  state.recognition = session;
+  renderGuessControls();
+  setStatus('Preparing voice input and lowering the song. The turn timer keeps running.');
   try {
-    recognition.start();
+    await session.start();
+    if (state.recognition === session) {
+      setStatus(`Listening for up to 15 seconds.${volumeWarning || ' Music stays lowered until this turn ends.'}`, Boolean(volumeWarning));
+    }
   } catch (err) {
-    state.recognition = null;
-    renderGuessControls();
+    if (state.recognition === session) {
+      stopVoiceRecognition();
+      renderGuessControls();
+    }
     throw err;
   }
 }
@@ -1151,6 +1178,7 @@ function showScreen(name) {
 
 async function nextSong() {
   clearAutomationTimers();
+  await state.voiceRestoration;
   state.roundPhase = 'idle';
   spotify().activate();
   if (!unplayedSongCount() && state.playlistLoader?.hasMore && state.spotifyApiMode === 'live') {
@@ -1281,9 +1309,11 @@ window.addEventListener('message', (event) => {
 
 window.addEventListener('storage', (event) => {
   if (event.key === KEYS.spotifyApiMode) {
-    setSpotifyApiMode(event.newValue === 'live' ? 'live' : 'mock', { persist: false });
+    setSpotifyApiMode(event.newValue === 'live' ? 'live' : 'mock', { persist: false }).catch(reportError);
   }
 });
+
+window.addEventListener('pagehide', () => stopVoiceRecognition());
 
 on('spotify-api-mode', 'change', () => setSpotifyApiMode($('spotify-api-mode').value));
 
@@ -1297,7 +1327,9 @@ on('spotify-form', 'submit', async (e) => {
   await startLogin(clientId);
 });
 
-on('logout', 'click', () => {
+on('logout', 'click', async () => {
+  stopVoiceRecognition();
+  await state.voiceRestoration;
   if (state.playlistLoader) state.playlistLoader.cancelled = true;
   state.playlistLoader = null;
   logout();
@@ -1426,6 +1458,8 @@ on('wrong-reveal', 'click', () => {
 on('next', 'click', () => state.game.mode === 'no-steve' ? finishRound() : nextSong());
 on('refresh-devices', 'click', () => refreshDevices());
 on('device', 'change', async () => {
+  stopVoiceRecognition();
+  await state.voiceRestoration;
   const selectedDevice = $('device').value;
   if (state.selectedDeviceId === EMBEDDED_DEVICE && selectedDevice !== EMBEDDED_DEVICE && embeddedIsPaused === false) {
     postEmbeddedMessage('pause');
@@ -1463,6 +1497,7 @@ on('answer-year', 'change', () => {
 on('answer-year', 'blur', () => renderAnswer());
 on('back-to-setup', 'click', async () => {
   clearAutomationTimers();
+  await state.voiceRestoration;
   const deviceId = $('device').value;
   if (deviceId === EMBEDDED_DEVICE) {
     if (embeddedPlayerIsOpen() && embeddedPlayerReady) postEmbeddedMessage('pause');

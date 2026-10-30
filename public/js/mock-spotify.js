@@ -23,6 +23,7 @@ export class MockSpotifyClient {
     this.deviceId = null;
     this.currentUri = null;
     this.isPlaying = false;
+    this.volume = 0.8;
   }
 
   async getPlaylistName() {
@@ -50,6 +51,12 @@ export class MockSpotifyClient {
   }
 
   activate() {}
+
+  async lowerVolumeForVoice() {
+    const original = this.volume;
+    this.volume = original * 0.2;
+    return async () => { this.volume = original; };
+  }
 
   async play(uri) {
     this.currentUri = uri;

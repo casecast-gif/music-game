@@ -519,6 +519,44 @@ export class SpotifyClient {
     return Boolean(this.player && deviceId && deviceId === this.deviceId);
   }
 
+  async lowerVolumeForVoice(deviceId = this.deviceId) {
+    let original;
+    let setVolume;
+    if (this.usesBrowserPlayer(deviceId)) {
+      const player = this.player;
+      original = await player.getVolume();
+      if (!Number.isFinite(original) || original < 0 || original > 1) {
+        throw new Error('The browser player did not report a valid volume.');
+      }
+      setVolume = (volume) => player.setVolume(volume);
+    } else {
+      const playback = await this.getPlaybackState();
+      if (!deviceId || playback?.device?.id !== deviceId) {
+        throw new Error('The selected Spotify device is not the active playback device.');
+      }
+      if (playback.device.supports_volume === false) {
+        throw new Error('This Spotify device does not support remote volume control.');
+      }
+      const percent = playback.device.volume_percent;
+      if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+        throw new Error('Spotify did not report a valid playback volume.');
+      }
+      original = percent;
+      setVolume = (volume) => this.api('/me/player/volume', {
+        method: 'PUT',
+        query: { device_id: deviceId, volume_percent: Math.round(volume) },
+      });
+    }
+    if (original === 0) return async () => {};
+    await setVolume(original * 0.2);
+    let restored = false;
+    return async () => {
+      if (restored) return;
+      await setVolume(original);
+      restored = true;
+    };
+  }
+
   async pause(deviceId = this.deviceId) {
     if (this.usesBrowserPlayer(deviceId)) return this.player.pause();
     return this.api('/me/player/pause', { method: 'PUT', query: { device_id: deviceId } });

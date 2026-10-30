@@ -301,6 +301,77 @@ test('togglePlay toggles the current track on the browser player', async () => {
   assert.equal(toggled, true);
 });
 
+test('browser voice ducking uses SDK volume controls and restores the original level only once', async () => {
+  const client = new SpotifyClient('unused');
+  const volumes = [];
+  client.deviceId = 'browser-device';
+  client.api = async () => { throw new Error('SDK ducking must not call the Web API'); };
+  client.player = {
+    getVolume: async () => 0.75,
+    setVolume: async (volume) => volumes.push(volume),
+  };
+  const restore = await client.lowerVolumeForVoice('browser-device');
+  assert.equal(volumes.length, 1);
+  assert.ok(Math.abs(volumes[0] - 0.15) < 0.00001);
+  await restore();
+  await restore();
+  assert.deepEqual(volumes.slice(1), [0.75]);
+});
+
+test('Connect voice ducking targets the selected device and restores its exact reported volume', async () => {
+  const client = new SpotifyClient('unused');
+  const calls = [];
+  client.api = async (path, options) => {
+    calls.push({ path, options });
+    if (path === '/me/player') return { device: { id: 'speaker', volume_percent: 70, supports_volume: true } };
+    return null;
+  };
+  const restore = await client.lowerVolumeForVoice('speaker');
+  await restore();
+  await restore();
+  assert.equal(calls.length, 3);
+  assert.equal(calls[1].path, '/me/player/volume');
+  assert.equal(calls[1].options.method, 'PUT');
+  assert.deepEqual(calls[1].options.query, { device_id: 'speaker', volume_percent: 14 });
+  assert.deepEqual(calls[2].options.query, { device_id: 'speaker', volume_percent: 70 });
+});
+
+test('voice ducking never raises a muted speaker or changes a different active device', async () => {
+  const client = new SpotifyClient('unused');
+  let calls = 0;
+  client.api = async () => {
+    calls += 1;
+    return { device: { id: 'speaker', volume_percent: 0 } };
+  };
+  const restore = await client.lowerVolumeForVoice('speaker');
+  await restore();
+  assert.equal(calls, 1, 'no volume write is needed for an already muted speaker');
+  await assert.rejects(client.lowerVolumeForVoice('other-speaker'), /not the active/);
+  assert.equal(calls, 2);
+});
+
+test('voice ducking rejects unsupported or unknown volumes instead of guessing a restoration level', async () => {
+  const client = new SpotifyClient('unused');
+  client.api = async () => ({ device: { id: 'speaker', volume_percent: 50, supports_volume: false } });
+  await assert.rejects(client.lowerVolumeForVoice('speaker'), /does not support/);
+  client.api = async () => ({ device: { id: 'speaker', volume_percent: null } });
+  await assert.rejects(client.lowerVolumeForVoice('speaker'), /valid playback volume/);
+});
+
+test('voice volume restoration preserves rate limit errors without retrying', async () => {
+  const client = new SpotifyClient('unused');
+  let writes = 0;
+  client.api = async (path) => {
+    if (path === '/me/player') return { device: { id: 'speaker', volume_percent: 80 } };
+    writes += 1;
+    if (writes === 2) throw Object.assign(new Error('Quota exceeded'), { status: 429, reason: 'QUOTA_EXCEEDED' });
+    return null;
+  };
+  const restore = await client.lowerVolumeForVoice('speaker');
+  await assert.rejects(restore(), { status: 429, reason: 'QUOTA_EXCEEDED' });
+  assert.equal(writes, 2);
+});
+
 test('togglePlay retries one malformed successful playback-state response', async () => {
   const client = new SpotifyClient('unused');
   let stateReads = 0;
