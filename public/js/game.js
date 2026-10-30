@@ -14,7 +14,7 @@ export function manualClockDisplaySeconds(deadlineAt, now = Date.now()) {
 }
 
 export function guessTimeLimitSeconds(round) {
-  return (round?.out?.length ?? 0) === 0 ? FIRST_GUESS_SECONDS : FOLLOWUP_GUESS_SECONDS;
+  return round?.attempted?.length || round?.out?.length ? FOLLOWUP_GUESS_SECONDS : FIRST_GUESS_SECONDS;
 }
 
 const PLAYLIST_ID_RE = /^[A-Za-z0-9]{22}$/;
@@ -205,7 +205,7 @@ export function passTurn(game, roundIndex, contestantId) {
   return round.currentTurnId;
 }
 
-/** Advances an I'm Steve turn: everyone gets one try before successful players run the board. */
+/** Everyone gets one try before successful players rotate through the remaining categories. */
 export function resolveManualTurn(game, roundIndex, contestantId, category = null) {
   const round = game.rounds[roundIndex];
   if (!round) throw new Error(`No round ${roundIndex}`);
@@ -257,7 +257,7 @@ function nextManualRunner(game, round, previousIndex) {
     !round.out.includes(contestant.id) && roundPoints(round, contestant.id) > 0);
 }
 
-/** Scores a correct single guess, then advances the current contestant either way. */
+/** Scores a guess and keeps correct contestants eligible until they miss or pass. */
 export function resolveGuess(game, roundIndex, contestantId, category, correct) {
   if (category !== null && !CATEGORIES.includes(category)) throw new Error(`Unknown category: ${category}`);
   if (typeof correct !== 'boolean') throw new Error('Guess result must be true or false');
@@ -267,8 +267,7 @@ export function resolveGuess(game, roundIndex, contestantId, category, correct) 
   if (category !== null && scoredCategories(round, game.contestants).includes(category)) {
     throw new Error(`${CATEGORY_LABELS[category]} has already been identified`);
   }
-  if (correct) setAward(game, roundIndex, contestantId, category);
-  const nextTurnId = passTurn(game, roundIndex, contestantId);
+  const { nextTurnId } = resolveManualTurn(game, roundIndex, contestantId, correct ? category : null);
   return { correct, nextTurnId };
 }
 

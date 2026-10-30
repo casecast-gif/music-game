@@ -222,7 +222,7 @@ test('a contestant keeps their turn on correct answers, but wrong/pass advances 
   assert.deepEqual(game.rounds[1].out, []);
 });
 
-test('resolveGuess awards correct answers and advances after every single guess', () => {
+test('No Steve keeps correct players eligible after other players miss', () => {
   const game = createGame();
   const a = createContestant('A');
   const b = createContestant('B');
@@ -232,11 +232,96 @@ test('resolveGuess awards correct answers and advances after every single guess'
 
   assert.deepEqual(resolveGuess(game, 0, a.id, 'artist', true), { correct: true, nextTurnId: b.id });
   assert.equal(getAward(game.rounds[0], a.id, 'artist'), true);
-  assert.deepEqual(resolveGuess(game, 0, b.id, null, false), { correct: false, nextTurnId: null });
+  assert.deepEqual(resolveGuess(game, 0, b.id, null, false), { correct: false, nextTurnId: a.id });
   assert.equal(getAward(game.rounds[0], b.id, 'title'), false);
-  assert.deepEqual(game.rounds[0].out, [a.id, b.id]);
+  assert.deepEqual(game.rounds[0].out, [b.id]);
+  assert.deepEqual(resolveGuess(game, 0, a.id, 'title', true), { correct: true, nextTurnId: a.id });
+  assert.deepEqual(resolveGuess(game, 0, a.id, 'year', true), { correct: true, nextTurnId: null });
+  assert.equal(roundPoints(game.rounds[0], a.id), 3);
   assert.throws(() => resolveGuess(game, 0, b.id, null, true), /must identify a category/);
   assert.throws(() => resolveGuess(game, 0, b.id, 'album', false), /Unknown category/);
+});
+
+test('No Steve circles back after two correct categories and credits each player separately', () => {
+  const game = createGame();
+  const a = createContestant('A');
+  const b = createContestant('B');
+  for (const contestant of [a, b]) addContestant(game, contestant);
+  nextRound(game, ['x']);
+  const round = currentRound(game);
+  assert.equal(guessTimeLimitSeconds(round), 60);
+  resolveGuess(game, 0, a.id, 'title', true);
+  assert.equal(guessTimeLimitSeconds(round), 20);
+  resolveGuess(game, 0, b.id, 'artist', true);
+  assert.equal(currentTurn(game).id, a.id);
+  assert.deepEqual(scoredCategories(round, game.contestants), ['artist', 'title']);
+  assert.deepEqual(round.out, []);
+  assert.equal(round.boardActive, true);
+  assert.equal(guessTimeLimitSeconds(round), 20);
+  assert.equal(getAward(round, a.id, 'title'), true);
+  assert.equal(getAward(round, b.id, 'title'), false);
+  assert.equal(getAward(round, b.id, 'artist'), true);
+  assert.equal(getAward(round, a.id, 'artist'), false);
+  resolveGuess(game, 0, a.id, 'year', true);
+  assert.equal(currentTurn(game), null);
+  assert.equal(roundPoints(round, a.id), 2);
+  assert.equal(roundPoints(round, b.id), 1);
+  const rows = standings(game);
+  assert.deepEqual(rows[0].byCategory, { artist: 0, title: 1, year: 1 });
+  assert.deepEqual(rows[1].byCategory, { artist: 1, title: 0, year: 0 });
+});
+
+test('No Steve runners rotate after a miss and stop only when everyone is out', () => {
+  const game = createGame();
+  const a = createContestant('A');
+  const b = createContestant('B');
+  for (const contestant of [a, b]) addContestant(game, contestant);
+  nextRound(game, ['x']);
+  resolveGuess(game, 0, a.id, 'title', true);
+  resolveGuess(game, 0, b.id, 'artist', true);
+  resolveGuess(game, 0, a.id, 'year', false);
+  assert.equal(currentTurn(game).id, b.id);
+  assert.equal(getAward(currentRound(game), a.id, 'year'), false);
+  resolveGuess(game, 0, b.id, null, false);
+  assert.equal(currentTurn(game), null);
+  assert.deepEqual(currentRound(game).out, [a.id, b.id]);
+  assert.deepEqual(scoredCategories(currentRound(game), game.contestants), ['artist', 'title']);
+  assert.equal(roundPoints(currentRound(game), a.id), 1);
+  assert.equal(roundPoints(currentRound(game), b.id), 1);
+});
+
+test('No Steve waits for all first attempts before returning to successful players', () => {
+  const game = createGame();
+  const players = ['A', 'B', 'C', 'D'].map((name) => createContestant(name));
+  players.forEach((player) => addContestant(game, player));
+  nextRound(game, ['x']);
+  resolveGuess(game, 0, players[0].id, 'artist', true);
+  resolveGuess(game, 0, players[1].id, null, false);
+  assert.equal(currentTurn(game).id, players[2].id);
+  resolveGuess(game, 0, players[2].id, null, false);
+  assert.equal(currentTurn(game).id, players[3].id);
+  resolveGuess(game, 0, players[3].id, null, false);
+  assert.equal(currentTurn(game).id, players[0].id);
+  resolveGuess(game, 0, players[0].id, null, false);
+  assert.equal(currentTurn(game), null);
+});
+
+test('No Steve preserves runner eligibility and category awards when a game is resumed', () => {
+  const game = createGame();
+  const a = createContestant('A');
+  const b = createContestant('B');
+  for (const contestant of [a, b]) addContestant(game, contestant);
+  nextRound(game, ['x']);
+  resolveGuess(game, 0, a.id, 'title', true);
+  resolveGuess(game, 0, b.id, 'artist', true);
+  const restored = deserializeGame(serializeGame(game));
+  assert.equal(currentTurn(restored).id, a.id);
+  assert.equal(currentRound(restored).boardActive, true);
+  assert.equal(roundPoints(currentRound(restored), a.id), 1);
+  assert.equal(roundPoints(currentRound(restored), b.id), 1);
+  resolveGuess(restored, 0, a.id, 'year', true);
+  assert.equal(currentTurn(restored), null);
+  assert.equal(roundPoints(currentRound(restored), a.id), 2);
 });
 
 test("I'm Steve gives everyone a first attempt, then rotates among correct contestants", () => {

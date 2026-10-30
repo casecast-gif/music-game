@@ -16,7 +16,6 @@ import {
   isTeam,
   nextRound,
   parsePlaylistId,
-  passTurn,
   removeContestant,
   resolveManualTurn,
   resolveGuess,
@@ -660,7 +659,7 @@ function renderRoundScoring() {
       if (isOut) {
         const status = document.createElement('span');
         status.className = 'members contestant-status';
-        status.textContent = noSteve ? 'Turn complete' : 'Out this song';
+        status.textContent = 'Out this song';
         nameCell.append(status);
       }
       tr.append(nameCell);
@@ -686,7 +685,12 @@ function renderRoundScoring() {
       }
       const turnCell = document.createElement('td');
       if (noSteve) {
-        turnCell.textContent = isCurrent ? 'Now' : isOut ? 'Done' : 'Waiting';
+        turnCell.textContent = isCurrent ? 'Now'
+          : isOut ? 'Out'
+            : !activeContestant ? 'Done'
+              : round?.attempted?.includes(c.id) && roundPoints(round, c.id) > 0
+                ? round.boardActive ? 'Runner' : 'Board eligible'
+                : 'Waiting';
       } else {
         if (isOut) {
           turnCell.textContent = 'Out';
@@ -764,7 +768,6 @@ function renderGuessControls() {
   $('speak-guess').hidden = !speechRecognitionAvailable();
   $('pass-guess').disabled = state.roundPhase !== 'turn' || !activeContestant;
   $('next').disabled = state.roundPhase === 'game-over';
-  $('play-pause').disabled = state.game.mode === 'no-steve' && state.roundPhase === 'turn';
   $('replay').disabled = state.game.mode === 'no-steve' && state.roundPhase === 'turn';
   $('next').textContent = state.game.mode === 'no-steve' ? 'Skip song' : '⏭ Next song';
   $('turn-progress').max = guessTimeLimitSeconds(currentRound(state.game));
@@ -998,7 +1001,7 @@ function resolvePassTurn(reason) {
   const contestant = currentTurn(state.game);
   if (!contestant) return finishRound();
   stopVoiceRecognition();
-  passTurn(state.game, roundIndex, contestant.id);
+  resolveGuess(state.game, roundIndex, contestant.id, null, false);
   saveGame();
   renderScores();
   showGuessFeedback(`${reason} ${contestant.name}. No answer was revealed.`, false);

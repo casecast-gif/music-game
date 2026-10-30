@@ -25,7 +25,12 @@ test('mock Spotify client supports playlist and playback flows without network r
   assert.equal((await client.getDevices())[0].id, MOCK_DEVICE_ID);
   assert.equal(await client.initPlayer(), MOCK_DEVICE_ID);
   await client.play(tracks[0].uri, MOCK_DEVICE_ID);
+  assert.equal(client.isPlaying, true);
   assert.equal(await client.togglePlay(MOCK_DEVICE_ID, tracks[0].uri), true);
+  assert.equal(client.isPlaying, false);
+  assert.equal(client.currentUri, tracks[0].uri);
+  assert.equal(await client.togglePlay(MOCK_DEVICE_ID, tracks[0].uri), true);
+  assert.equal(client.isPlaying, true);
   await client.pause(MOCK_DEVICE_ID);
   assert.equal(requests, 0);
 });
