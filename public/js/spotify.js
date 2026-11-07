@@ -11,6 +11,27 @@ const PLAYBACK_POLL_ATTEMPTS = 8;
 const PLAYBACK_POLL_INTERVAL_MS = 300;
 const MAX_RATE_LIMIT_RETRIES = 3;
 const MAX_AUTOMATIC_RETRY_WAIT_MS = 30_000;
+const FETCH_TIMEOUT_MS = 15_000;
+
+/**
+ * fetch() with a deadline. All API calls share one serial queue, so a request
+ * that never settles would otherwise stall every later play/pause forever.
+ */
+async function fetchWithTimeout(url, init = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller?.abort();
+      reject(Object.assign(new Error(`Spotify did not respond within ${Math.round(timeoutMs / 1000)} seconds. Check the connection and try again.`), { timeout: true }));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([fetch(url, { ...init, signal: controller?.signal }), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function isMalformedJsonResponse(error) {
   return error?.status === 200 && error.message?.includes('invalid non-JSON response');
@@ -94,12 +115,12 @@ function saveToken(data, previous = {}) {
 }
 
 async function tokenRequest(body) {
-  const res = await fetch(TOKEN_URL, {
+  const res = await fetchWithTimeout(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(body),
   });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`Spotify login failed (${res.status}): ${data.error_description ?? data.error ?? 'check the Client ID and redirect URI'}`);
   return data;
 }
@@ -193,10 +214,10 @@ function rateLimitDelay(error, attempt) {
   return Math.min(30_000, Math.round(1000 * (2 ** attempt) * (0.8 + Math.random() * 0.4)));
 }
 
-export async function getAccessToken(clientId) {
+export async function getAccessToken(clientId, { forceRefresh = false } = {}) {
   const token = loadToken();
   if (!token) throw new Error('Not logged in to Spotify');
-  if (Date.now() < token.expiresAt) return token.accessToken;
+  if (!forceRefresh && Date.now() < token.expiresAt) return token.accessToken;
   if (!token.refreshToken) throw new Error('Spotify session expired, please log in again');
   // Share one in-flight refresh: Spotify may rotate the refresh token, so
   // concurrent refreshes with the same token could invalidate the session.
@@ -215,6 +236,45 @@ export class SpotifyClient {
     this.player = null;
     this.playbackQueue = Promise.resolve();
     this.apiQueue = Promise.resolve();
+    // Every device id the browser SDK has reported; the SDK can re-register
+    // under a new id after a reconnect, so stale ids still mean "this browser".
+    this.browserDeviceIds = new Set();
+    this.readyWaiters = [];
+    this.pollIntervalMs = PLAYBACK_POLL_INTERVAL_MS;
+    this.fetchTimeoutMs = FETCH_TIMEOUT_MS;
+  }
+
+  /** True when `deviceId` is (or was) this tab's Web Playback SDK device. */
+  isBrowserDevice(deviceId) {
+    return Boolean(deviceId && (deviceId === this.deviceId || this.browserDeviceIds.has(deviceId)));
+  }
+
+  /**
+   * Resolves with the browser player's device id, waiting for the SDK to
+   * report `ready` again after a disconnect. Rejects after `timeoutMs`.
+   */
+  waitForBrowserDevice(timeoutMs = 10_000) {
+    if (this.deviceId) return Promise.resolve(this.deviceId);
+    if (!this.player) return Promise.reject(new Error('The Spotify browser player has not been started.'));
+    return new Promise((resolve, reject) => {
+      const waiter = (deviceId) => {
+        clearTimeout(timer);
+        resolve(deviceId);
+      };
+      const timer = setTimeout(() => {
+        this.readyWaiters = this.readyWaiters.filter((w) => w !== waiter);
+        reject(new Error('The Spotify browser player disconnected and has not reconnected. Reload the page or choose a Spotify Connect device.'));
+      }, timeoutMs);
+      this.readyWaiters.push(waiter);
+    });
+  }
+
+  handleBrowserReady(deviceId) {
+    this.deviceId = deviceId;
+    this.browserDeviceIds.add(deviceId);
+    const waiters = this.readyWaiters;
+    this.readyWaiters = [];
+    for (const waiter of waiters) waiter(deviceId);
   }
 
   api(path, options = {}) {
@@ -225,16 +285,24 @@ export class SpotifyClient {
 
   async request(path, { method = 'GET', body, query } = {}) {
     assertApiAvailable();
-    const token = await getAccessToken(this.clientId);
+    let token = await getAccessToken(this.clientId);
+    let refreshedAfter401 = false;
     const url = new URL(path.startsWith('http') ? path : `${API}${path}`);
     if (query) for (const [k, v] of Object.entries(query)) if (v != null) url.searchParams.set(k, v);
     for (let attempt = 0; ; attempt += 1) {
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         method,
         headers: { Accept: 'application/json', Authorization: 'Bearer ' + token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
         body: body ? JSON.stringify(body) : undefined,
-      });
+      }, this.fetchTimeoutMs);
       if (res.status === 204) return null;
+      // An access token can be revoked or expire early (sleeping laptop, clock
+      // skew). Refresh once and retry instead of failing mid-game.
+      if (res.status === 401 && !refreshedAfter401 && loadToken()?.refreshToken) {
+        refreshedAfter401 = true;
+        token = await getAccessToken(this.clientId, { forceRefresh: true });
+        continue;
+      }
       const text = await res.text();
       const makeError = (message) => {
         const error = new Error(message);
@@ -370,10 +438,12 @@ export class SpotifyClient {
           });
           this.player = player;
           player.addListener('ready', ({ device_id }) => {
+            // Record every ready, not just the first: after a reconnect the SDK
+            // fires ready again (possibly with a new id) and it must be adopted.
+            this.handleBrowserReady(device_id);
             if (settled) return;
             settled = true;
             clearTimeout(timeout);
-            this.deviceId = device_id;
             resolve(device_id);
           });
           player.addListener('not_ready', () => {
@@ -446,7 +516,7 @@ export class SpotifyClient {
       const state = await this.getPlaybackState();
       if (state?.device?.id === deviceId && state.device.is_active !== false) return true;
       if (attempt < DEVICE_POLL_ATTEMPTS - 1) {
-        await new Promise((resolve) => setTimeout(resolve, PLAYBACK_POLL_INTERVAL_MS));
+        await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
       }
     }
     return false;
@@ -455,22 +525,58 @@ export class SpotifyClient {
   async startPlayback(uri, deviceId) {
     if (!uri) throw new Error('Choose a Spotify track before starting playback.');
     if (!deviceId) throw new Error('Choose a Spotify device before starting playback.');
-    const state = await this.getPlaybackState();
-    if (state?.device?.id !== deviceId || state.device.is_active === false) {
-      await this.api('/me/player', {
-        method: 'PUT',
-        body: { device_ids: [deviceId], play: false },
-      });
-      if (!(await this.waitForActiveDevice(deviceId))) {
-        throw new Error('Spotify accepted the device transfer, but that device did not become active. Open Spotify on it, select it as the active speaker, then retry.');
-      }
-    }
+    await this.ensureActiveDevice(deviceId);
+    await this.sendPlay(uri, deviceId);
+    const first = await this.confirmPlayback(uri, deviceId);
+    if (first.confirmed) return;
 
-    await this.api('/me/player/play', {
+    // Spotify answered 204 but the device kept playing something else. This is
+    // seen with the browser SDK: the command never reaches the player and it
+    // carries on with the previous round's song. Re-target the device (the
+    // transfer also stops the stale song) and send the play once more.
+    try {
+      await this.ensureActiveDevice(deviceId, { force: true });
+    } catch (error) {
+      console.warn('Re-targeting the Spotify device before retrying play failed', error);
+    }
+    await this.sendPlay(uri, deviceId);
+    const second = await this.confirmPlayback(uri, deviceId);
+    if (second.confirmed) return;
+    throw this.playbackNotConfirmedError(uri, deviceId, second);
+  }
+
+  /** Transfers playback to `deviceId` unless Spotify already reports it active. */
+  async ensureActiveDevice(deviceId, { force = false } = {}) {
+    if (!force) {
+      const state = await this.getPlaybackState();
+      if (state?.device?.id === deviceId && state.device.is_active !== false) return;
+    }
+    await this.api('/me/player', {
       method: 'PUT',
-      query: { device_id: deviceId },
-      body: { uris: [uri] },
+      body: { device_ids: [deviceId], play: false },
     });
+    if (!(await this.waitForActiveDevice(deviceId))) {
+      throw new Error('Spotify accepted the device transfer, but that device did not become active. Open Spotify on it, select it as the active speaker, then retry.');
+    }
+  }
+
+  async sendPlay(uri, deviceId) {
+    try {
+      await this.api('/me/player/play', {
+        method: 'PUT',
+        query: { device_id: deviceId },
+        body: { uris: [uri] },
+      });
+    } catch (error) {
+      // Spotify's play endpoint sometimes returns 5xx after it has in fact
+      // started the track; let confirmation (and the retry) decide.
+      if (!(error.status >= 500)) throw error;
+      console.warn('Spotify play request returned a server error; checking whether playback started anyway', error);
+    }
+  }
+
+  /** Polls the device until it reports `uri` playing. Never throws for a mismatch. */
+  async confirmPlayback(uri, deviceId) {
     const browserPlayer = this.usesBrowserPlayer(deviceId) ? this.player : null;
     let lastPlayback = null;
     for (let attempt = 0; attempt < PLAYBACK_POLL_ATTEMPTS; attempt += 1) {
@@ -490,15 +596,19 @@ export class SpotifyClient {
         )) &&
         currentUri === uri &&
         isPlaying
-      ) return;
+      ) return { confirmed: true, lastPlayback, browser: Boolean(browserPlayer) };
       if (attempt < PLAYBACK_POLL_ATTEMPTS - 1) {
-        await new Promise((resolve) => setTimeout(resolve, PLAYBACK_POLL_INTERVAL_MS));
+        await new Promise((resolve) => setTimeout(resolve, this.pollIntervalMs));
       }
     }
-    if (browserPlayer) {
+    return { confirmed: false, lastPlayback, browser: Boolean(browserPlayer) };
+  }
+
+  playbackNotConfirmedError(uri, deviceId, { lastPlayback, browser }) {
+    if (browser) {
       const activeTrack = lastPlayback?.track_window?.current_track?.uri ?? 'none';
       const isPlaying = lastPlayback ? (lastPlayback.paused ? 'no' : 'yes') : 'unknown';
-      throw new Error(`Spotify accepted the play request, but the browser player never reported the game track as playing. Expected="${uri}". Last state: track="${activeTrack}", playing=${isPlaying}.`);
+      return new Error(`Spotify accepted the play request (sent twice), but the browser player never reported the game track as playing. Expected="${uri}". Last state: track="${activeTrack}", playing=${isPlaying}.`);
     }
     const activeDevice = lastPlayback?.device?.name ?? lastPlayback?.device?.id ?? 'none';
     const activeTrack = lastPlayback?.item?.uri ?? 'none';
@@ -506,7 +616,7 @@ export class SpotifyClient {
     const deviceActive = lastPlayback?.device?.is_active == null
       ? 'unknown'
       : lastPlayback.device.is_active ? 'yes' : 'no';
-    throw new Error(`Spotify accepted the play request, but never reported the game track as playing. Expected="${uri}". Last state: device="${activeDevice}", active=${deviceActive}, track="${activeTrack}", playing=${isPlaying}.`);
+    return new Error(`Spotify accepted the play request (sent twice), but never reported the game track as playing. Expected="${uri}". Last state: device="${activeDevice}", active=${deviceActive}, track="${activeTrack}", playing=${isPlaying}.`);
   }
 
   play(uri, deviceId = this.deviceId) {

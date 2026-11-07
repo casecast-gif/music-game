@@ -223,13 +223,15 @@ test('API GET requests use bounded jittered backoff when Retry-After is absent',
     requests += 1;
     return new Response('{"error":{"status":429,"message":"Too many requests"}}', { status: 429 });
   };
+  const client = new SpotifyClient('unused');
   globalThis.setTimeout = (callback, delay) => {
+    if (delay === client.fetchTimeoutMs) return 0; // per-request deadline: never fires here
     delays.push(delay);
     queueMicrotask(callback);
     return 0;
   };
 
-  await assert.rejects(new SpotifyClient('unused').api('/me'), /Too many requests/);
+  await assert.rejects(client.api('/me'), /Too many requests/);
 
   assert.equal(requests, 4);
   assert.equal(delays.length, 3);
@@ -532,19 +534,172 @@ test('play waits for the selected device to become active before starting the tr
 
 test('play reports when Spotify accepts a request but the device stays idle', async () => {
   const client = new SpotifyClient('unused');
+  client.pollIntervalMs = 0;
+  let plays = 0;
   client.api = async (path) => {
+    if (path === '/me/player/play') plays += 1;
     if (path === '/me/player') return { device: { id: 'device-id' }, item: null, is_playing: false };
     return null;
   };
 
   await assert.rejects(
     client.play('spotify:track:abc', 'device-id'),
-    /Spotify accepted the play request, but never reported the game track as playing.*playing=no/,
+    /Spotify accepted the play request \(sent twice\), but never reported the game track as playing.*playing=no/,
   );
+  assert.equal(plays, 2);
+});
+
+test('play re-targets the browser player and re-sends play when it keeps the previous track', async () => {
+  const client = new SpotifyClient('unused');
+  client.pollIntervalMs = 0;
+  client.deviceId = 'browser-device';
+  const requests = [];
+  let plays = 0;
+  client.player = {
+    async getCurrentState() {
+      // The SDK ignores the first play and carries on with the previous round's song.
+      return {
+        track_window: { current_track: { uri: plays >= 2 ? 'spotify:track:game' : 'spotify:track:previous' } },
+        paused: false,
+      };
+    },
+  };
+  client.api = async (path, options = {}) => {
+    requests.push([path, options.method ?? 'GET']);
+    if (path === '/me/player/play') plays += 1;
+    if (path === '/me/player' && !options.method) {
+      return { device: { id: 'browser-device', is_active: true }, item: { uri: 'spotify:track:previous' }, is_playing: true };
+    }
+    return null;
+  };
+
+  await client.play('spotify:track:game', 'browser-device');
+
+  assert.deepEqual(requests, [
+    ['/me/player', 'GET'],
+    ['/me/player/play', 'PUT'],
+    ['/me/player', 'PUT'],
+    ['/me/player', 'GET'],
+    ['/me/player/play', 'PUT'],
+  ]);
+});
+
+test('play treats a 5xx from the play endpoint as unconfirmed rather than failed', async () => {
+  const client = new SpotifyClient('unused');
+  client.pollIntervalMs = 0;
+  client.api = async (path) => {
+    if (path === '/me/player/play') throw Object.assign(new Error('Bad gateway'), { status: 502 });
+    return { device: { id: 'device-id' }, item: { uri: 'spotify:track:abc' }, is_playing: true };
+  };
+
+  await client.play('spotify:track:abc', 'device-id');
+});
+
+test('play still surfaces client errors such as a missing device', async () => {
+  const client = new SpotifyClient('unused');
+  client.pollIntervalMs = 0;
+  client.api = async (path) => {
+    if (path === '/me/player/play') throw Object.assign(new Error('Device not found'), { status: 404 });
+    return { device: { id: 'device-id' }, item: null, is_playing: false };
+  };
+
+  await assert.rejects(client.play('spotify:track:abc', 'device-id'), { status: 404 });
+});
+
+test('browser player adopts a new device id when the SDK reconnects', async (t) => {
+  let player;
+  class Player {
+    constructor() {
+      this.listeners = {};
+      player = this;
+    }
+
+    addListener(name, callback) {
+      this.listeners[name] = callback;
+    }
+
+    connect() {
+      this.listeners.ready({ device_id: 'first-id' });
+      return Promise.resolve(true);
+    }
+  }
+  installBrowserSdk(t, Player);
+  const client = new SpotifyClient('client-id');
+
+  assert.equal(await client.initPlayer('Test player'), 'first-id');
+  player.listeners.not_ready({ device_id: 'first-id' });
+  assert.equal(client.deviceId, null);
+  const waiting = client.waitForBrowserDevice(1000);
+  player.listeners.ready({ device_id: 'second-id' });
+
+  assert.equal(await waiting, 'second-id');
+  assert.equal(client.deviceId, 'second-id');
+  assert.equal(client.isBrowserDevice('first-id'), true);
+  assert.equal(client.usesBrowserPlayer('second-id'), true);
+});
+
+test('waitForBrowserDevice gives up when the SDK never reconnects', async () => {
+  const client = new SpotifyClient('unused');
+  client.player = {};
+  await assert.rejects(client.waitForBrowserDevice(10), /disconnected and has not reconnected/);
+});
+
+function installTokenStorage(t, token) {
+  const previous = { fetch: globalThis.fetch, localStorage: globalThis.localStorage };
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[name];
+      else globalThis[name] = value;
+    }
+  });
+  const store = new Map([['musicGame.spotifyToken', JSON.stringify(token)]]);
+  globalThis.localStorage = {
+    getItem: (key) => store.get(key) ?? null,
+    setItem: (key, value) => store.set(key, value),
+    removeItem: (key) => store.delete(key),
+  };
+  return store;
+}
+
+test('api refreshes the token once and retries after a 401', async (t) => {
+  installTokenStorage(t, { accessToken: 'old', refreshToken: 'refresh', expiresAt: Date.now() + 60_000 });
+  const auth = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('accounts.spotify.com')) {
+      return new Response(JSON.stringify({ access_token: 'new', expires_in: 3600 }), { status: 200 });
+    }
+    auth.push(init.headers.Authorization);
+    if (init.headers.Authorization === 'Bearer old') {
+      return new Response(JSON.stringify({ error: { status: 401, message: 'The access token expired' } }), { status: 401 });
+    }
+    return new Response(JSON.stringify({ id: 'me' }), { status: 200 });
+  };
+
+  const client = new SpotifyClient('client-id');
+  assert.deepEqual(await client.api('/me'), { id: 'me' });
+  assert.deepEqual(auth, ['Bearer old', 'Bearer new']);
+});
+
+test('api times out a request that never settles so the queue keeps moving', async (t) => {
+  installTokenStorage(t, { accessToken: 'tok', expiresAt: Date.now() + 60_000 });
+  let calls = 0;
+  globalThis.fetch = async (url, init) => {
+    calls += 1;
+    if (calls === 1) {
+      return new Promise((_, reject) => init.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+    }
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+
+  const client = new SpotifyClient('client-id');
+  client.fetchTimeoutMs = 20;
+  await assert.rejects(client.api('/me/player'), /did not respond within/);
+  assert.deepEqual(await client.api('/me/player'), { ok: true });
 });
 
 test('play does not issue a track request until Spotify confirms the transfer', async () => {
   const client = new SpotifyClient('unused');
+  client.pollIntervalMs = 0;
   let playRequested = false;
   client.api = async (path, options = {}) => {
     if (path === '/me/player' && options.method === 'PUT') return null;

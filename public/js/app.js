@@ -555,6 +555,9 @@ function openEmbeddedPlayer(uri, { play = false } = {}) {
 
 async function ensurePlayer() {
   if (spotify().deviceId) return spotify().deviceId;
+  // The SDK was started but dropped its connection: wait for it to re-register
+  // rather than reusing the (resolved) first-start promise and its stale id.
+  if (spotify().player) return spotify().waitForBrowserDevice();
   if (!state.playerPromise) {
     state.playerPromise = spotify().initPlayer('Music Game', undefined, (err) => setStatus(err.message, true)).catch((err) => {
       state.playerPromise = null;
@@ -607,6 +610,9 @@ async function playCurrent() {
     setStatus('Game song sent to the Spotify player window. Use its Play control if playback does not start.');
     return;
   }
+  // A select value holding an old browser-SDK id (from before a reconnect) still
+  // means "this browser"; resolve it to the SDK's current id below.
+  if (spotify().isBrowserDevice?.(deviceId)) deviceId = BROWSER_DEVICE;
   if (deviceId === BROWSER_DEVICE) {
     try {
       if (!spotify().deviceId) {
@@ -1246,7 +1252,7 @@ async function startVoiceGuess() {
   const previousRestoration = state.voiceRestoration;
   const client = spotify();
   const selectedDevice = $('device').value;
-  const deviceId = selectedDevice === BROWSER_DEVICE ? client.deviceId : selectedDevice;
+  const deviceId = selectedDevice === BROWSER_DEVICE || client.isBrowserDevice?.(selectedDevice) ? client.deviceId : selectedDevice;
   let volumeWarning = '';
   const listenSeconds = timings().voiceSeconds;
   const session = new VoiceGuessSession(Recognition, {
@@ -1607,7 +1613,7 @@ on('play-pause', 'click', async () => {
     setStatus(action === 'play' ? 'Starting playback in the Spotify player window…' : 'Pausing the Spotify player…');
     return;
   }
-  if (deviceId === BROWSER_DEVICE) deviceId = spotify().deviceId;
+  if (deviceId === BROWSER_DEVICE || spotify().isBrowserDevice?.(deviceId)) deviceId = spotify().deviceId;
   if (!deviceId) return playCurrent();
   if (!(await spotify().togglePlay(deviceId, track.uri))) await playCurrent();
 });
