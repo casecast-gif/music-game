@@ -13,8 +13,42 @@ export function manualClockDisplaySeconds(deadlineAt, now = Date.now()) {
   return Math.min(MANUAL_DISPLAY_SECONDS, Math.max(0, Math.ceil((MANUAL_DISPLAY_SECONDS * 1000 - elapsed) / 1000)));
 }
 
-export function guessTimeLimitSeconds(round) {
-  return round?.attempted?.length || round?.out?.length ? FOLLOWUP_GUESS_SECONDS : FIRST_GUESS_SECONDS;
+/**
+ * No Steve timer settings, stored on the game so they survive reloads and can be
+ * changed mid-game. Every value is a whole number of seconds within [min, max].
+ */
+export const TIMING_LIMITS = {
+  firstGuessSeconds: { min: 5, max: 300, default: FIRST_GUESS_SECONDS },
+  followupGuessSeconds: { min: 5, max: 300, default: FOLLOWUP_GUESS_SECONDS },
+  revealSeconds: { min: 0, max: 30, default: 6 },
+  voiceSeconds: { min: 5, max: 30, default: 15 },
+  playbackWaitSeconds: { min: 0, max: 15, default: 5 },
+};
+
+export const DEFAULT_TIMINGS = Object.freeze(
+  Object.fromEntries(Object.entries(TIMING_LIMITS).map(([key, limit]) => [key, limit.default])),
+);
+
+/** Returns a complete, valid timings object: numbers are rounded and clamped, anything else falls back to the default. */
+export function normalizeTimings(input) {
+  const source = input && typeof input === 'object' ? input : {};
+  const result = {};
+  for (const [key, { min, max, default: fallback }] of Object.entries(TIMING_LIMITS)) {
+    const raw = typeof source[key] === 'string' && source[key].trim() !== '' ? Number(source[key]) : source[key];
+    result[key] = typeof raw === 'number' && Number.isFinite(raw) ? Math.min(max, Math.max(min, Math.round(raw))) : fallback;
+  }
+  return result;
+}
+
+/** Merges a partial timings change into the game. Running timers keep their deadline; new values apply from the next turn. */
+export function updateTimings(game, changes) {
+  game.timings = normalizeTimings({ ...normalizeTimings(game.timings), ...changes });
+  return game.timings;
+}
+
+export function guessTimeLimitSeconds(round, timings = DEFAULT_TIMINGS) {
+  const { firstGuessSeconds, followupGuessSeconds } = normalizeTimings(timings);
+  return round?.attempted?.length || round?.out?.length ? followupGuessSeconds : firstGuessSeconds;
 }
 
 const PLAYLIST_ID_RE = /^[A-Za-z0-9]{22}$/;
@@ -74,12 +108,13 @@ export function isTeam(contestant) {
   return contestant.members.length > 0;
 }
 
-export function createGame({ playlistId = null, contestants = [], targetScore = DEFAULT_TARGET_SCORE, mode = 'no-steve' } = {}) {
+export function createGame({ playlistId = null, contestants = [], targetScore = DEFAULT_TARGET_SCORE, mode = 'no-steve', timings = DEFAULT_TIMINGS } = {}) {
   return {
     playlistId,
     contestants: contestants.slice(),
     targetScore: Number.isSafeInteger(targetScore) && targetScore > 0 ? targetScore : DEFAULT_TARGET_SCORE,
     mode: mode === 'im-steve' ? 'im-steve' : 'no-steve',
+    timings: normalizeTimings(timings),
     deck: [], // remaining track ids to play, in order
     rounds: [], // { trackId, awards: { [contestantId]: { artist, title, year } } }
   };
@@ -155,6 +190,7 @@ export function nextRound(game, trackIds, rng = Math.random) {
     boardActive: false,
     currentTurnId: game.contestants[startingContestantIndex]?.id ?? null,
     turnDeadlineAt: null,
+    turnSeconds: null,
     listenDeadlineAt: null,
     phase: game.mode === 'no-steve' ? 'turn' : 'manual',
   });
@@ -202,6 +238,7 @@ export function passTurn(game, roundIndex, contestantId) {
   round.out.push(contestantId);
   round.currentTurnId = nextActiveContestant(game.contestants, round, currentIndex)?.id ?? null;
   round.turnDeadlineAt = null;
+  round.turnSeconds = null;
   return round.currentTurnId;
 }
 
@@ -222,6 +259,7 @@ export function resolveManualTurn(game, roundIndex, contestantId, category = nul
   if (!round.attempted.includes(contestantId)) round.attempted.push(contestantId);
   if (category === null) round.out.push(contestantId);
   round.turnDeadlineAt = null;
+  round.turnSeconds = null;
 
   if (scoredCategories(round, game.contestants).length === CATEGORIES.length) {
     round.currentTurnId = null;
@@ -331,6 +369,7 @@ export function deserializeGame(json) {
       contestants,
       targetScore: Number.isSafeInteger(data.targetScore) && data.targetScore > 0 ? data.targetScore : DEFAULT_TARGET_SCORE,
       mode: data.mode === 'no-steve' ? 'no-steve' : 'im-steve',
+      timings: normalizeTimings(data.timings),
       deck: Array.isArray(data.deck) ? data.deck.filter((id) => typeof id === 'string') : [],
       rounds: data.rounds
         .filter((r) => r && typeof r.trackId === 'string')
@@ -349,6 +388,7 @@ export function deserializeGame(json) {
             boardActive: r.boardActive === true,
             currentTurnId,
             turnDeadlineAt: Number.isSafeInteger(r.turnDeadlineAt) && r.turnDeadlineAt > 0 ? r.turnDeadlineAt : null,
+            turnSeconds: Number.isSafeInteger(r.turnSeconds) && r.turnSeconds > 0 ? r.turnSeconds : null,
             listenDeadlineAt: data.mode === 'no-steve' ? null
               : Number.isSafeInteger(r.listenDeadlineAt) && r.listenDeadlineAt > 0 ? r.listenDeadlineAt : null,
             phase: data.mode === 'no-steve' && r.phase === 'listening' ? 'turn'

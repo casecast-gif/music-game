@@ -4,6 +4,9 @@ import {
   CATEGORY_LABELS,
   DEFAULT_TARGET_SCORE,
   MANUAL_TURN_SECONDS,
+  TIMING_LIMITS,
+  normalizeTimings,
+  updateTimings,
   guessTimeLimitSeconds,
   manualClockDisplaySeconds,
   addContestant,
@@ -44,14 +47,21 @@ const KEYS = {
   yearOverrides: 'musicGame.yearOverrides',
   deviceId: 'musicGame.deviceId',
   spotifyApiMode: 'musicGame.spotifyApiMode',
+  timings: 'musicGame.timings',
+};
+
+// Labels for the No Steve timer inputs (setup screen and in-game drawer). Limits live in game.js.
+const TIMING_LABELS = {
+  firstGuessSeconds: 'First guess',
+  followupGuessSeconds: 'Later guesses',
+  revealSeconds: 'Reveal pause',
+  voiceSeconds: 'Voice listening',
+  playbackWaitSeconds: 'Wait for playback',
 };
 
 const BROWSER_DEVICE = '__browser__';
 const EMBEDDED_DEVICE = '__spotify_embed__';
 const EMBEDDED_CHANNEL = 'music-game-spotify-player';
-const ROUND_REVEAL_MS = 6_000;
-// Longest a new round waits for Spotify to confirm playback before guessing opens anyway.
-const PLAYBACK_WAIT_MS = 5_000;
 const $ = (id) => document.getElementById(id);
 let embeddedPlayerWindow = null;
 let embeddedPlayerReady = false;
@@ -125,7 +135,10 @@ function loadSelectedMode(savedGame) {
   return savedGame.mode;
 }
 
-const initialGame = deserializeGame(localStorage.getItem(KEYS.game)) ?? createGame();
+const savedTimings = loadJson(KEYS.timings, null);
+const initialGame = deserializeGame(localStorage.getItem(KEYS.game)) ?? createGame({ timings: savedTimings ?? undefined });
+// A saved game's timers win over the stored preference so a resumed game keeps its pace.
+const initialTimings = localStorage.getItem(KEYS.game) ? initialGame.timings : normalizeTimings(savedTimings);
 
 const state = {
   spotifyApiMode: localStorage.getItem(KEYS.spotifyApiMode) === 'live' ? 'live' : 'mock',
@@ -136,6 +149,7 @@ const state = {
   game: initialGame,
   selectedMode: loadSelectedMode(initialGame),
   targetScore: loadTargetScore(),
+  timings: initialTimings,
   roundPhase: 'idle',
   turnTimerInterval: null,
   advanceTimeout: null,
@@ -155,6 +169,67 @@ const state = {
 
 function saveGame() {
   localStorage.setItem(KEYS.game, serializeGame(state.game));
+}
+
+function timings() {
+  return normalizeTimings(state.game.timings);
+}
+
+function seconds(value) {
+  return `${value} second${value === 1 ? '' : 's'}`;
+}
+
+/** Builds one number input per timer inside `container`; ids are `${prefix}-${key}`. */
+function buildTimingInputs(container, prefix) {
+  container.append(...Object.entries(TIMING_LIMITS).map(([key, { min, max }]) => {
+    const label = document.createElement('label');
+    label.className = 'timing-field';
+    label.append(`${TIMING_LABELS[key]} (s)`);
+    const input = document.createElement('input');
+    input.id = `${prefix}-${key}`;
+    input.type = 'number';
+    input.min = String(min);
+    input.max = String(max);
+    input.step = '1';
+    input.dataset.timing = key;
+    label.append(input);
+    return label;
+  }));
+  container.addEventListener('change', (event) => {
+    const key = event.target?.dataset?.timing;
+    if (key) applyTimingChange(key, event.target.value);
+  });
+}
+
+function renderTimingInputs(prefix) {
+  const current = timings();
+  for (const key of Object.keys(TIMING_LIMITS)) {
+    const input = $(`${prefix}-${key}`);
+    if (input && document.activeElement !== input) input.value = String(current[key]);
+  }
+}
+
+function describeTimings() {
+  const t = timings();
+  return `No Steve: the first guess gets ${seconds(t.firstGuessSeconds)}; every later guess gets ${seconds(t.followupGuessSeconds)}. Correct players circle back until everyone misses or all categories are solved.`;
+}
+
+/**
+ * Updates one timer from either the setup screen or the in-game drawer. The value is
+ * clamped to its limits, saved on the game and as the default for future games.
+ * A running turn or reveal keeps its current deadline; the change applies next time.
+ */
+function applyTimingChange(key, rawValue) {
+  const { min, max } = TIMING_LIMITS[key];
+  const updated = updateTimings(state.game, { [key]: rawValue });
+  state.timings = { ...updated };
+  localStorage.setItem(KEYS.timings, JSON.stringify(updated));
+  saveGame();
+  renderTimingInputs('setup-timing');
+  renderTimingInputs('game-timing');
+  $('turn-duration-setting').textContent = describeTimings();
+  const clamped = Number(rawValue) !== updated[key];
+  setStatus(`${TIMING_LABELS[key]} set to ${seconds(updated[key])}${clamped ? ` (allowed ${min}–${max})` : ''}. Applies from the next ${key === 'revealSeconds' ? 'song' : 'turn'}.`);
 }
 
 function setStatus(message, isError = false) {
@@ -187,6 +262,9 @@ function renderSetup() {
   $('mode-no-steve').classList.toggle('primary', noSteve);
   $('mode-im-steve').classList.toggle('primary', !noSteve);
   $('turn-duration-setting').hidden = !noSteve;
+  $('turn-duration-setting').textContent = describeTimings();
+  $('setup-timings').hidden = !noSteve;
+  renderTimingInputs('setup-timing');
   $('mode-description').textContent = noSteve
     ? 'No host needed: the screen runs timed turns, checks submitted guesses, keeps wrong answers hidden, and advances automatically.'
     : 'Host-controlled play: a host operates the reveal and scoring controls, and decides when to move on.';
@@ -518,13 +596,13 @@ function playbackWarning(err) {
 
 /**
  * Starts the round's song without letting playback decide whether the round
- * proceeds. Waits up to PLAYBACK_WAIT_MS so the guess timer usually starts with
+ * proceeds. Waits up to the game's playbackWaitSeconds so the guess timer usually starts with
  * the music, then returns; failures (now or later) are shown as warnings.
  * Resolves to true when playback was confirmed in time.
  */
 async function startRoundPlayback(round) {
   const playback = playCurrent();
-  const outcome = await settleWithin(playback, PLAYBACK_WAIT_MS);
+  const outcome = await settleWithin(playback, timings().playbackWaitSeconds * 1000);
   const stillCurrent = () => currentRound(state.game) === round;
   if (outcome.status === 'rejected') {
     if (stillCurrent()) setStatus(playbackWarning(outcome.reason), true);
@@ -805,8 +883,13 @@ function renderGuessControls() {
   $('next').disabled = state.roundPhase === 'game-over';
   $('replay').disabled = state.game.mode === 'no-steve' && state.roundPhase === 'turn';
   $('next').textContent = state.game.mode === 'no-steve' ? 'Skip song' : '⏭ Next song';
-  $('turn-progress').max = guessTimeLimitSeconds(currentRound(state.game));
+  $('turn-progress').max = turnLengthSeconds(currentRound(state.game));
   $('turn-countdown').textContent = '';
+}
+
+// The running turn keeps the length it started with, even if the timers change mid-turn.
+function turnLengthSeconds(round) {
+  return round?.turnSeconds ?? guessTimeLimitSeconds(round, timings());
 }
 
 function stopRoundClock() {
@@ -846,7 +929,7 @@ function updateRoundClock() {
   const round = currentRound(state.game);
   if (state.roundPhase !== 'turn' || !round?.turnDeadlineAt) return;
   const remaining = Math.max(0, round.turnDeadlineAt - now);
-  $('turn-progress').max = guessTimeLimitSeconds(round);
+  $('turn-progress').max = turnLengthSeconds(round);
   $('turn-progress').value = Math.ceil(remaining / 1000);
   $('turn-countdown').textContent = `${Math.ceil(remaining / 1000)}s`;
   if (remaining === 0) {
@@ -883,9 +966,10 @@ function startTurnClock({ resume = false } = {}) {
   state.roundPhase = 'turn';
   round.phase = 'turn';
   round.listenDeadlineAt = null;
-  round.turnDeadlineAt = resume && round.turnDeadlineAt > Date.now()
-    ? round.turnDeadlineAt
-    : Date.now() + guessTimeLimitSeconds(round) * 1000;
+  if (!(resume && round.turnDeadlineAt > Date.now())) {
+    round.turnSeconds = guessTimeLimitSeconds(round, timings());
+    round.turnDeadlineAt = Date.now() + round.turnSeconds * 1000;
+  }
   $('guess-text').value = '';
   saveGame();
   renderGame();
@@ -961,11 +1045,12 @@ function finishRound() {
     return;
   }
 
-  showGuessFeedback(`Next song in ${ROUND_REVEAL_MS / 1000} seconds.`);
-  setStatus(`Round complete. The next song starts in ${ROUND_REVEAL_MS / 1000} seconds.`);
+  const { revealSeconds } = timings();
+  showGuessFeedback(revealSeconds ? `Next song in ${seconds(revealSeconds)}.` : 'Next song starting…');
+  setStatus(revealSeconds ? `Round complete. The next song starts in ${seconds(revealSeconds)}.` : 'Round complete. Starting the next song.');
   state.advanceTimeout = setTimeout(() => {
     nextSong().catch(reportError);
-  }, ROUND_REVEAL_MS);
+  }, revealSeconds * 1000);
 }
 
 function finishManualRound() {
@@ -1096,7 +1181,9 @@ async function startVoiceGuess() {
   const selectedDevice = $('device').value;
   const deviceId = selectedDevice === BROWSER_DEVICE ? client.deviceId : selectedDevice;
   let volumeWarning = '';
+  const listenSeconds = timings().voiceSeconds;
   const session = new VoiceGuessSession(Recognition, {
+    durationMs: listenSeconds * 1000,
     lowerVolume: async () => {
       await previousRestoration;
       if (session.closed) return async () => {};
@@ -1106,7 +1193,7 @@ async function startVoiceGuess() {
     onTranscript: (transcript) => {
       if (state.recognition !== session || state.roundPhase !== 'turn') return;
       $('guess-text').value = transcript;
-      setStatus(`${session.isCapturing ? 'Listening for up to 15 seconds.' : 'Voice transcript ready.'} Review your guess and submit when ready.${volumeWarning}`, Boolean(volumeWarning));
+      setStatus(`${session.isCapturing ? `Listening for up to ${seconds(listenSeconds)}.` : 'Voice transcript ready.'} Review your guess and submit when ready.${volumeWarning}`, Boolean(volumeWarning));
     },
     onListeningEnd: (transcript) => {
       if (state.recognition !== session) return;
@@ -1134,7 +1221,7 @@ async function startVoiceGuess() {
   try {
     await session.start();
     if (state.recognition === session) {
-      setStatus(`Listening for up to 15 seconds.${volumeWarning || ' Music stays lowered until this turn ends.'}`, Boolean(volumeWarning));
+      setStatus(`Listening for up to ${seconds(listenSeconds)}.${volumeWarning || ' Music stays lowered until this turn ends.'}`, Boolean(volumeWarning));
     }
   } catch (err) {
     if (state.recognition === session) {
@@ -1199,6 +1286,8 @@ function renderGame() {
   renderAnswer();
   renderScores();
   renderHistory();
+  $('game-timings').hidden = state.game.mode !== 'no-steve';
+  renderTimingInputs('game-timing');
 }
 
 function showScreen(name) {
@@ -1267,6 +1356,7 @@ async function enterGame({ fresh }) {
     resetScores(state.game);
     state.game.targetScore = state.targetScore;
     state.game.mode = state.selectedMode;
+    state.game.timings = normalizeTimings(state.timings);
   } else {
     state.targetScore = state.game.targetScore;
     state.selectedMode = state.game.mode;
@@ -1307,7 +1397,7 @@ async function enterGame({ fresh }) {
         finishRound();
       } else {
         startTurnClock({ resume: true });
-        if (playing) setStatus(`Game resumed — ${currentTurn(state.game)?.name}’s turn (${guessTimeLimitSeconds(round)}-second limit). Music continues playing.`);
+        if (playing) setStatus(`Game resumed — ${currentTurn(state.game)?.name}’s turn (${turnLengthSeconds(round)}-second limit). Music continues playing.`);
       }
     }
   }
@@ -1566,6 +1656,8 @@ document.addEventListener('keydown', (e) => {
 
 (async function init() {
   showScreen('setup');
+  buildTimingInputs($('setup-timings'), 'setup-timing');
+  buildTimingInputs($('game-timings-fields'), 'game-timing');
   $('speak-guess').hidden = !speechRecognitionAvailable();
   $('setup-settings').open = state.spotifyApiMode === 'live' && (!state.clientId || !isLoggedIn());
   renderSetup();

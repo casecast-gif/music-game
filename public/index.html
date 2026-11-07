@@ -34,6 +34,9 @@
           <span id="target-score-hint" class="hint"></span>
         </div>
         <p id="turn-duration-setting" class="hint">No Steve: the first guess gets 60 seconds; every later guess gets 20 seconds. Correct players circle back until everyone misses or all categories are solved.</p>
+        <fieldset id="setup-timings" class="timing-settings">
+          <legend>Timers (seconds) — also adjustable during the game</legend>
+        </fieldset>
 
         <h2>Players &amp; teams</h2>
         <form id="contestant-form" class="row">
@@ -181,6 +184,12 @@
               </thead>
               <tbody id="scoreboard"></tbody>
             </table>
+
+            <details id="game-timings" class="settings">
+              <summary>⏱ Timers</summary>
+              <div id="game-timings-fields" class="timing-settings"></div>
+              <p class="hint">Changes apply from the next turn; the current countdown keeps going.</p>
+            </details>
 
             <h3>Played songs</h3>
             <ol id="history" class="history" reversed></ol>

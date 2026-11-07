@@ -5,6 +5,10 @@ import {
   createContestant,
   createGame,
   DEFAULT_TARGET_SCORE,
+  DEFAULT_TIMINGS,
+  TIMING_LIMITS,
+  normalizeTimings,
+  updateTimings,
   MANUAL_DISPLAY_SECONDS,
   MANUAL_TURN_SECONDS,
   guessTimeLimitSeconds,
@@ -422,4 +426,71 @@ test('games survive serialization', () => {
   }));
   assert.equal(oldGame.rounds[0].turnDeadlineAt, null);
   assert.equal(oldGame.rounds[0].phase, null);
+});
+
+test('timings default to the classic No Steve values', () => {
+  assert.deepEqual(DEFAULT_TIMINGS, {
+    firstGuessSeconds: 60,
+    followupGuessSeconds: 20,
+    revealSeconds: 6,
+    voiceSeconds: 15,
+    playbackWaitSeconds: 5,
+  });
+  assert.deepEqual(createGame().timings, DEFAULT_TIMINGS);
+  assert.notEqual(createGame().timings, DEFAULT_TIMINGS, 'each game gets its own copy');
+});
+
+test('normalizeTimings clamps, rounds, accepts numeric strings and falls back on junk', () => {
+  const timings = normalizeTimings({
+    firstGuessSeconds: 1,
+    followupGuessSeconds: 999,
+    revealSeconds: '0',
+    voiceSeconds: 12.6,
+    playbackWaitSeconds: 'soon',
+  });
+  assert.equal(timings.firstGuessSeconds, TIMING_LIMITS.firstGuessSeconds.min);
+  assert.equal(timings.followupGuessSeconds, TIMING_LIMITS.followupGuessSeconds.max);
+  assert.equal(timings.revealSeconds, 0);
+  assert.equal(timings.voiceSeconds, 13);
+  assert.equal(timings.playbackWaitSeconds, 5);
+  assert.deepEqual(normalizeTimings(null), DEFAULT_TIMINGS);
+  assert.deepEqual(normalizeTimings({ revealSeconds: '', voiceSeconds: NaN, firstGuessSeconds: Infinity }), DEFAULT_TIMINGS);
+});
+
+test('guessTimeLimitSeconds reads the game timings', () => {
+  const game = createGame({ timings: { firstGuessSeconds: 45, followupGuessSeconds: 10 } });
+  const a = createContestant('A');
+  const b = createContestant('B');
+  addContestant(game, a);
+  addContestant(game, b);
+  nextRound(game, ['x']);
+  const round = currentRound(game);
+  assert.equal(guessTimeLimitSeconds(round, game.timings), 45);
+  passTurn(game, 0, a.id);
+  assert.equal(guessTimeLimitSeconds(round, game.timings), 10);
+  assert.equal(guessTimeLimitSeconds(round), 20, 'no timings means defaults');
+});
+
+test('updateTimings merges partial changes mid-game and survives save/restore', () => {
+  const game = createGame();
+  addContestant(game, createContestant('A'));
+  nextRound(game, ['x']);
+  updateTimings(game, { revealSeconds: 12, followupGuessSeconds: '30' });
+  assert.equal(game.timings.revealSeconds, 12);
+  assert.equal(game.timings.followupGuessSeconds, 30);
+  assert.equal(game.timings.firstGuessSeconds, 60);
+  updateTimings(game, { voiceSeconds: 500 });
+  assert.equal(game.timings.voiceSeconds, 30);
+  currentRound(game).turnSeconds = 60;
+  const restored = deserializeGame(serializeGame(game));
+  assert.deepEqual(restored.timings, game.timings);
+  assert.equal(restored.rounds[0].turnSeconds, 60);
+});
+
+test('older saves without timings restore with defaults', () => {
+  const restored = deserializeGame(JSON.stringify({ contestants: [], rounds: [], mode: 'no-steve' }));
+  assert.deepEqual(restored.timings, DEFAULT_TIMINGS);
+  const tampered = deserializeGame(JSON.stringify({ contestants: [], rounds: [], timings: { firstGuessSeconds: -4, revealSeconds: 'x' } }));
+  assert.equal(tampered.timings.firstGuessSeconds, 5);
+  assert.equal(tampered.timings.revealSeconds, 6);
 });
