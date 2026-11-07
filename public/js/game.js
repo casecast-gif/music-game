@@ -193,8 +193,82 @@ export function nextRound(game, trackIds, rng = Math.random) {
     turnSeconds: null,
     listenDeadlineAt: null,
     phase: game.mode === 'no-steve' ? 'turn' : 'manual',
+    revealed: hiddenAnswers(),
   });
   return trackId;
+}
+
+function hiddenAnswers() {
+  return { artist: false, title: false, year: false };
+}
+
+/**
+ * The round's revealed-answer flags (what the audience / TV may see). Scored categories
+ * always count as revealed. Returns the live object on the round so callers can set flags.
+ */
+export function revealedAnswers(game, round = currentRound(game)) {
+  if (!round) return hiddenAnswers();
+  round.revealed = { ...hiddenAnswers(), ...(round.revealed ?? {}) };
+  for (const category of scoredCategories(round, game.contestants)) round.revealed[category] = true;
+  return round.revealed;
+}
+
+export function revealAnswer(game, category, round = currentRound(game)) {
+  if (!CATEGORIES.includes(category)) throw new Error(`Unknown category: ${category}`);
+  if (round) revealedAnswers(game, round)[category] = true;
+}
+
+export function revealAllAnswers(game, round = currentRound(game)) {
+  if (round) round.revealed = { artist: true, title: true, year: true };
+}
+
+export function allAnswersRevealed(game, round = currentRound(game)) {
+  return CATEGORIES.every((category) => revealedAnswers(game, round)[category]);
+}
+
+/**
+ * Builds the audience-safe snapshot for the TV / presentation view. Only answers that are
+ * revealed are included, so hidden answers never leave the host screen.
+ * `answers` holds the display strings for the current song: { artist, title, year, image, album }.
+ */
+export function presentationSnapshot(game, { answers = {}, phase = null, now = Date.now() } = {}) {
+  const round = currentRound(game);
+  const revealed = revealedAnswers(game, round);
+  const complete = Boolean(round) && CATEGORIES.every((category) => revealed[category]);
+  const turn = currentTurn(game);
+  return {
+    version: 1,
+    sentAt: now,
+    mode: game.mode,
+    targetScore: game.targetScore,
+    roundNumber: game.rounds.length,
+    phase: phase ?? round?.phase ?? 'idle',
+    turnName: turn?.name ?? null,
+    clock: round?.turnDeadlineAt
+      ? { deadlineAt: round.turnDeadlineAt, seconds: game.mode === 'im-steve' ? MANUAL_DISPLAY_SECONDS : round.turnSeconds ?? null, manual: game.mode === 'im-steve' }
+      : null,
+    answers: Object.fromEntries(CATEGORIES.map((category) => [
+      category,
+      round && revealed[category] && answers[category] != null ? String(answers[category]) : null,
+    ])),
+    revealed: { ...revealed },
+    complete,
+    image: complete && answers.image ? String(answers.image) : null,
+    album: complete && answers.album ? String(answers.album) : null,
+    round: game.contestants.map((contestant) => ({
+      name: contestant.name,
+      points: round ? roundPoints(round, contestant.id) : 0,
+      out: Boolean(round?.out?.includes(contestant.id)),
+      current: turn?.id === contestant.id,
+    })),
+    standings: standings(game).map((row) => ({
+      rank: row.rank,
+      name: row.contestant.name,
+      members: row.contestant.members,
+      total: row.total,
+      byCategory: { ...row.byCategory },
+    })),
+  };
 }
 
 export function currentRound(game) {
@@ -393,6 +467,7 @@ export function deserializeGame(json) {
               : Number.isSafeInteger(r.listenDeadlineAt) && r.listenDeadlineAt > 0 ? r.listenDeadlineAt : null,
             phase: data.mode === 'no-steve' && r.phase === 'listening' ? 'turn'
               : ['listening', 'turn', 'manual', 'reveal', 'game-over'].includes(r.phase) ? r.phase : null,
+            revealed: Object.fromEntries(CATEGORIES.map((category) => [category, r.revealed?.[category] === true])),
           };
         }),
     };

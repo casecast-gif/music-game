@@ -31,6 +31,11 @@ import {
   setAward,
   shuffle,
   standings,
+  revealedAnswers,
+  revealAnswer,
+  revealAllAnswers,
+  allAnswersRevealed,
+  presentationSnapshot,
 } from '../public/js/game.js';
 import { DEFAULT_PLAYLIST_URL } from '../public/js/config.js';
 
@@ -493,4 +498,76 @@ test('older saves without timings restore with defaults', () => {
   const tampered = deserializeGame(JSON.stringify({ contestants: [], rounds: [], timings: { firstGuessSeconds: -4, revealSeconds: 'x' } }));
   assert.equal(tampered.timings.firstGuessSeconds, 5);
   assert.equal(tampered.timings.revealSeconds, 6);
+});
+
+const SONG = { artist: 'Queen', title: 'Bohemian Rhapsody', year: '1975', image: 'cover.jpg', album: 'A Night at the Opera' };
+
+function steveGame() {
+  const game = createGame({ mode: 'im-steve', targetScore: 10 });
+  addContestant(game, createContestant('Ann', [], 'a'));
+  addContestant(game, createContestant('Bob', ['B1', 'B2'], 'b'));
+  nextRound(game, ['x']);
+  return game;
+}
+
+test('new rounds start with every answer hidden', () => {
+  const game = steveGame();
+  assert.deepEqual(currentRound(game).revealed, { artist: false, title: false, year: false });
+  assert.equal(allAnswersRevealed(game), false);
+});
+
+test('revealed answers persist on the round through save/restore', () => {
+  const game = steveGame();
+  revealAnswer(game, 'year');
+  const restored = deserializeGame(serializeGame(game));
+  assert.deepEqual(restored.rounds[0].revealed, { artist: false, title: false, year: true });
+  revealAllAnswers(restored);
+  assert.equal(allAnswersRevealed(restored), true);
+  assert.throws(() => revealAnswer(game, 'album'), /Unknown category/);
+});
+
+test('scored categories count as revealed; older saves and junk restore as hidden', () => {
+  const game = steveGame();
+  resolveManualTurn(game, 0, 'a', 'title');
+  assert.deepEqual(revealedAnswers(game), { artist: false, title: true, year: false });
+  const old = deserializeGame(JSON.stringify({ contestants: [], rounds: [{ trackId: 'x', awards: {} }] }));
+  assert.deepEqual(old.rounds[0].revealed, { artist: false, title: false, year: false });
+  const junk = deserializeGame(JSON.stringify({ contestants: [], rounds: [{ trackId: 'x', awards: {}, revealed: { artist: 'yes', year: true, extra: true } }] }));
+  assert.deepEqual(junk.rounds[0].revealed, { artist: false, title: false, year: true });
+});
+
+test('presentationSnapshot only carries revealed answers to the TV', () => {
+  const game = steveGame();
+  let snap = presentationSnapshot(game, { answers: SONG, now: 1 });
+  assert.deepEqual(snap.answers, { artist: null, title: null, year: null });
+  assert.equal(snap.image, null);
+  assert.equal(snap.album, null);
+  assert.equal(JSON.stringify(snap).includes('Queen'), false);
+  assert.equal(snap.turnName, 'Ann');
+  assert.equal(snap.roundNumber, 1);
+
+  revealAnswer(game, 'artist');
+  snap = presentationSnapshot(game, { answers: SONG });
+  assert.equal(snap.answers.artist, 'Queen');
+  assert.equal(snap.answers.title, null);
+  assert.equal(JSON.stringify(snap).includes('Rhapsody'), false);
+
+  revealAllAnswers(game);
+  snap = presentationSnapshot(game, { answers: SONG });
+  assert.equal(snap.complete, true);
+  assert.equal(snap.answers.year, '1975');
+  assert.equal(snap.image, 'cover.jpg');
+});
+
+test('presentationSnapshot includes standings, live round state and the clock', () => {
+  const game = steveGame();
+  resolveManualTurn(game, 0, 'a', 'artist');
+  currentRound(game).turnDeadlineAt = 5000;
+  const snap = presentationSnapshot(game, { answers: SONG, phase: 'manual' });
+  assert.equal(snap.phase, 'manual');
+  assert.deepEqual(snap.standings.map((row) => [row.name, row.total, row.rank]), [['Ann', 1, 1], ['Bob', 0, 2]]);
+  assert.deepEqual(snap.standings[1].members, ['B1', 'B2']);
+  assert.deepEqual(snap.round.find((row) => row.name === 'Bob'), { name: 'Bob', points: 0, out: false, current: true });
+  assert.deepEqual(snap.clock, { deadlineAt: 5000, seconds: MANUAL_DISPLAY_SECONDS, manual: true });
+  assert.equal(presentationSnapshot(createGame()).roundNumber, 0);
 });

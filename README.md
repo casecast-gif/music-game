@@ -81,7 +81,9 @@ During an active game in either mode, fewer than 25 unplayed cached songs trigge
 - **Year** shows the *original* release year: Spotify often reports a remaster or compilation date, so the year is
   looked up on [MusicBrainz](https://musicbrainz.org) (earliest release of that recording) and falls back to Spotify's
   album year. The Year category is unavailable until an answer is ready. 1977 is displayed as **Star Wars** and 2001 as **Towers**.
-- Scores, players and the shuffle are saved in the browser, so a refresh doesn't lose the game (**Resume game**).
+- **I'm Steve host view**: the host screen always shows every answer (artist, song, year and album art) so the host can judge guesses. Answers the audience hasn't seen yet are dimmed and marked *hidden on TV*; they become normal once revealed or scored.
+- **📺 TV view**: press **Open TV view** (in either mode) to open `present.html` in a new window, then drag it to the TV or cast that tab. It shows the song number, the current turn, the countdown, revealed answers (hidden ones stay `?`) and the scoreboard, in a big-screen layout that also fits a phone. It updates live from the host window via `BroadcastChannel`, with a `localStorage` copy as a fallback and so a TV tab opened later (or reloaded) shows the current state immediately. Hidden answers are never sent to the TV view, so peeking at it can't spoil anything. Both windows must be in the same browser profile on the same device (it is not a network sync).
+- Scores, players, the shuffle and which answers have been revealed are saved in the browser, so a refresh doesn't lose the game (**Resume game**).
 
 ## Development
 
@@ -94,7 +96,8 @@ npm test           # unit tests (node --test)
 - `public/js/playlist.js` — resumable randomized playlist batches and low-song top-ups
 - `public/js/voice.js` — bounded voice capture and temporary music-volume handling
 - `public/js/year.js` — original-release-year lookup via MusicBrainz
-- `public/js/app.js` — UI wiring
+- `public/js/app.js` — UI wiring; publishes the TV snapshot
+- `public/present.html` + `public/js/present.js` — TV / audience view (renders `presentationSnapshot()` from game.js)
 - `server.js` — tiny static file server
 
 ## Deployment

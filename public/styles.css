@@ -69,6 +69,42 @@ code { background: #2a2a2a; padding: 0.1rem 0.35rem; border-radius: 4px; }
 .answers .label { display: block; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
 .answer { font-size: 1.6rem; font-weight: 700; }
 .answer-hidden { color: var(--muted); }
+.answer-secret { color: var(--muted); font-style: italic; text-decoration: underline dashed; text-underline-offset: 0.25em; }
+.answer-secret::after { content: ' (hidden on TV)'; font-size: 0.75rem; font-style: normal; font-weight: 400; }
+input.answer-secret { font-style: italic; }
+.round-header { flex-wrap: wrap; }
+
+/* ---------- TV / presentation view (present.html) ---------- */
+.present-page { min-height: 100vh; overflow-x: hidden; }
+.present { display: grid; grid-template-columns: minmax(0, 3fr) minmax(16rem, 2fr); gap: clamp(1rem, 3vw, 3rem); max-width: 1800px; margin: 0 auto; padding: clamp(1rem, 3vw, 3rem); min-height: 100vh; align-content: start; }
+.present-top { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.present-top h1 { font-size: clamp(1.4rem, 3.5vw, 3rem); }
+.present-meta { color: var(--muted); font-size: clamp(1rem, 2vw, 1.6rem); }
+.present-card { background: var(--panel); border-radius: 18px; padding: clamp(1rem, 3vw, 2.5rem); display: flex; gap: clamp(1rem, 3vw, 2.5rem); align-items: center; }
+.present-card img { width: clamp(7rem, 20vw, 22rem); aspect-ratio: 1; border-radius: 12px; object-fit: cover; }
+.present-answers { display: grid; gap: clamp(0.75rem, 2vw, 1.75rem); flex: 1; min-width: 0; }
+.present-label { display: block; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; font-size: clamp(0.8rem, 1.4vw, 1.2rem); }
+.present-answer { font-size: clamp(1.8rem, 5vw, 4.5rem); font-weight: 800; line-height: 1.1; overflow-wrap: anywhere; }
+.present-answer.hidden { color: #444; }
+.present-answer.just-revealed { animation: present-pop 0.6s ease-out; color: var(--accent); }
+@keyframes present-pop { from { transform: scale(0.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.present-album { color: var(--muted); font-size: clamp(0.9rem, 1.6vw, 1.4rem); }
+.present-turn { margin: clamp(0.75rem, 2vw, 1.5rem) 0 0; display: flex; align-items: center; justify-content: space-between; gap: 1rem; font-size: clamp(1.3rem, 3.5vw, 3rem); font-weight: 700; color: var(--accent); }
+.present-clock { color: var(--danger); font-size: clamp(2.5rem, 9vw, 7rem); font-variant-numeric: tabular-nums; font-weight: 800; line-height: 1; }
+.present-board h2 { font-size: clamp(1.2rem, 2.5vw, 2.2rem); margin-top: 0; }
+.present-board table { width: 100%; border-collapse: collapse; font-size: clamp(1rem, 2.2vw, 2rem); }
+.present-board td { padding: 0.4em 0.3em; border-bottom: 1px solid var(--border); }
+.present-board td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+.present-board tr.leader td { color: var(--accent); }
+.present-board tr.current td { background: #203328; }
+.present-board tr.out td { color: var(--muted); }
+.present-board .members { display: block; font-size: 0.55em; color: var(--muted); }
+.present-waiting { grid-column: 1 / -1; text-align: center; color: var(--muted); font-size: clamp(1.2rem, 3vw, 2.5rem); padding: 20vh 1rem; }
+@media (max-width: 760px) {
+  .present { grid-template-columns: 1fr; padding: 1rem 16px; }
+  .present-card { flex-direction: column; align-items: stretch; text-align: center; }
+  .present-card img { align-self: center; }
+}
 .year-answer { display: flex; align-items: baseline; gap: 0.75rem; }
 .year-answer small { font-size: 0.85rem; font-weight: normal; }
 .year-answer input { width: 11rem; font-size: 1.5rem; font-weight: 700; padding: 0.2rem 0.4rem; }

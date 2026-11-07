@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Music Game — TV</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="present-page">
+    <main class="present" id="present">
+      <div class="present-top">
+        <h1>🎵 Music Game</h1>
+        <span id="present-meta" class="present-meta"></span>
+      </div>
+
+      <p id="present-waiting" class="present-waiting">Waiting for the host screen… Start or resume a game in the main window.</p>
+
+      <section id="present-song" hidden>
+        <div class="present-card">
+          <img id="present-cover" alt="Album art" hidden />
+          <div class="present-answers">
+            <div><span class="present-label">Artist</span><span id="present-artist" class="present-answer hidden">?</span></div>
+            <div><span class="present-label">Song</span><span id="present-title" class="present-answer hidden">?</span></div>
+            <div><span class="present-label">Year</span><span id="present-year" class="present-answer hidden">?</span></div>
+            <div id="present-album" class="present-album" hidden></div>
+          </div>
+        </div>
+        <div class="present-turn" aria-live="polite">
+          <span id="present-turn"></span>
+          <output id="present-clock" class="present-clock" role="timer" hidden></output>
+        </div>
+      </section>
+
+      <section id="present-board" class="present-board" hidden>
+        <h2>Scoreboard <span id="present-goal" class="muted"></span></h2>
+        <table>
+          <tbody id="present-standings"></tbody>
+        </table>
+      </section>
+    </main>
+    <script type="module" src="js/present.js"></script>
+  </body>
+</html>

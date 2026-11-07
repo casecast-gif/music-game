@@ -28,7 +28,13 @@ import {
   serializeGame,
   getAward,
   standings,
+  revealedAnswers as roundRevealedAnswers,
+  revealAnswer,
+  revealAllAnswers as revealRoundAnswers,
+  allAnswersRevealed,
+  presentationSnapshot,
 } from './game.js';
+import { PRESENT_CHANNEL, PRESENT_STORAGE_KEY } from './present-sync.js';
 import { SpotifyClient, handleRedirect, isLoggedIn, logout, redirectUri, startLogin } from './spotify.js';
 import { MOCK_PLAYLIST_NAME, MOCK_TRACKS, MockSpotifyClient } from './mock-spotify.js';
 import { PlaylistLoader } from './playlist.js';
@@ -155,7 +161,6 @@ const state = {
   advanceTimeout: null,
   recognition: null,
   voiceRestoration: Promise.resolve(),
-  revealedAnswers: { artist: false, title: false, year: false },
   years: loadJson(KEYS.years, {}),
   yearOverrides: loadJson(KEYS.yearOverrides, {}),
   fallbackYears: {},
@@ -169,6 +174,56 @@ const state = {
 
 function saveGame() {
   localStorage.setItem(KEYS.game, serializeGame(state.game));
+  publishPresentation();
+}
+
+// ---------- TV / presentation sync ----------
+// The TV view (present.html) only ever receives presentationSnapshot(): revealed answers
+// and scores. BroadcastChannel is the fast path; the localStorage copy lets a freshly
+// opened TV tab render immediately and covers browsers without BroadcastChannel.
+const presentChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel(PRESENT_CHANNEL) : null;
+let lastPresentation = '';
+
+function currentAnswerStrings() {
+  const round = currentRound(state.game);
+  const track = round && state.tracks.get(round.trackId);
+  if (!track) return {};
+  const year = yearFor(track.id)?.year;
+  return {
+    artist: track.artists.join(', '),
+    title: displayTitle(track),
+    year: year ? formatYear(year) : 'Unavailable',
+    image: track.image ?? null,
+    album: track.album ?? null,
+  };
+}
+
+function publishPresentation({ force = false } = {}) {
+  const snapshot = presentationSnapshot(state.game, {
+    answers: currentAnswerStrings(),
+    phase: $('game')?.hidden === false ? state.roundPhase : 'idle',
+  });
+  const { sentAt, ...comparable } = snapshot;
+  const key = JSON.stringify(comparable);
+  if (!force && key === lastPresentation) return;
+  lastPresentation = key;
+  const json = JSON.stringify(snapshot);
+  try {
+    localStorage.setItem(PRESENT_STORAGE_KEY, json);
+  } catch {
+    // storage full or blocked: BroadcastChannel still delivers it
+  }
+  presentChannel?.postMessage(snapshot);
+}
+
+presentChannel?.addEventListener('message', (event) => {
+  if (event.data?.type === 'hello') publishPresentation({ force: true });
+});
+
+function openTvView() {
+  publishPresentation({ force: true });
+  const tv = window.open('present.html', 'music-game-tv');
+  if (!tv) setStatus('The browser blocked the TV window. Allow pop-ups, or open present.html in another tab.', true);
 }
 
 function timings() {
@@ -668,18 +723,27 @@ function trackLabel(track) {
 }
 
 function answersComplete() {
-  return Object.values(state.revealedAnswers).every(Boolean);
+  return allAnswersRevealed(state.game);
 }
 
 function revealAllAnswers() {
-  state.revealedAnswers = { artist: true, title: true, year: true };
+  revealRoundAnswers(state.game);
+}
+
+/** Revealed flags live on the round (persisted), so a reload or the TV view sees the same state. */
+function revealed() {
+  return roundRevealedAnswers(state.game);
 }
 
 function renderAnswer() {
   const round = currentRound(state.game);
   const track = round && state.tracks.get(round.trackId);
-  for (const category of scoredCategories(round, state.game.contestants)) state.revealedAnswers[category] = true;
+  const shown = revealed();
   const allAnswersComplete = answersComplete();
+  // I'm Steve: the host screen always shows every answer; dimmed ones are still hidden on the TV.
+  const hostView = state.game.mode === 'im-steve';
+  const visible = (category) => hostView || shown[category];
+  const showDetails = hostView || allAnswersComplete;
   const revealControls = {
     artist: $('reveal-artist'),
     title: $('reveal-title'),
@@ -687,36 +751,40 @@ function renderAnswer() {
   };
   for (const [category, button] of Object.entries(revealControls)) {
     button.hidden = state.game.mode === 'no-steve';
-    button.disabled = state.revealedAnswers[category];
-    button.textContent = state.revealedAnswers[category]
+    button.disabled = shown[category];
+    button.textContent = shown[category]
       ? `${CATEGORY_LABELS[category]} revealed ✓`
       : `Reveal ${CATEGORY_LABELS[category].toLowerCase()}`;
   }
   $('wrong-reveal').hidden = state.game.mode === 'no-steve';
   $('wrong-reveal').disabled = allAnswersComplete;
-  $('cover').src = (allAnswersComplete && track?.image) || '';
-  $('cover').hidden = !(allAnswersComplete && track?.image);
-  $('answer-artist').textContent = state.revealedAnswers.artist && track ? track.artists.join(', ') : '?';
-  $('answer-artist').classList.toggle('answer-hidden', !state.revealedAnswers.artist);
-  $('answer-title').textContent = state.revealedAnswers.title && track ? displayTitle(track) : '?';
-  $('answer-title').classList.toggle('answer-hidden', !state.revealedAnswers.title);
-  $('answer-album').textContent = allAnswersComplete && track ? `Spotify: “${track.title}” on ${track.album}` : '';
-  $('answer-album').hidden = !allAnswersComplete;
+  $('host-answers-hint').hidden = !hostView;
+  $('cover').src = (showDetails && track?.image) || '';
+  $('cover').hidden = !(showDetails && track?.image);
+  $('answer-artist').textContent = visible('artist') && track ? track.artists.join(', ') : '?';
+  $('answer-artist').classList.toggle('answer-hidden', !shown.artist);
+  $('answer-artist').classList.toggle('answer-secret', hostView && !shown.artist);
+  $('answer-title').textContent = visible('title') && track ? displayTitle(track) : '?';
+  $('answer-title').classList.toggle('answer-hidden', !shown.title);
+  $('answer-title').classList.toggle('answer-secret', hostView && !shown.title);
+  $('answer-album').textContent = showDetails && track ? `Spotify: “${track.title}” on ${track.album}` : '';
+  $('answer-album').hidden = !showDetails;
   const yearInput = $('answer-year');
   const info = track ? yearFor(track.id) : null;
-  yearInput.hidden = !state.revealedAnswers.year;
-  $('answer-year-placeholder').hidden = state.revealedAnswers.year;
+  yearInput.hidden = !visible('year');
+  $('answer-year-placeholder').hidden = visible('year');
   yearInput.readOnly = state.game.mode === 'no-steve' && !['reveal', 'game-over'].includes(state.roundPhase);
   if (document.activeElement !== yearInput) {
-    yearInput.value = state.revealedAnswers.year
+    yearInput.value = visible('year')
       ? info?.year
         ? formatYear(info.year)
         : 'Unavailable'
       : '?';
   }
-  yearInput.classList.toggle('answer-hidden', !state.revealedAnswers.year);
+  yearInput.classList.toggle('answer-hidden', !shown.year);
+  yearInput.classList.toggle('answer-secret', hostView && !shown.year);
   const sources = { musicbrainz: 'original release (MusicBrainz)', spotify: 'from Spotify album', manual: 'set by host' };
-  $('year-source').textContent = !state.revealedAnswers.year
+  $('year-source').textContent = !visible('year')
     ? ''
     : info
       ? state.pendingYears.has(track.id) && info.source === 'spotify'
@@ -725,6 +793,7 @@ function renderAnswer() {
       : track && state.pendingYears.has(track.id)
         ? 'looking up original year…'
         : '';
+  publishPresentation();
 }
 
 function renderRoundScoring() {
@@ -1084,7 +1153,7 @@ function completeManualTurn(contestantId, category = null, { timedOut = false } 
   }
   stopRoundClock();
   resolveManualTurn(state.game, roundIndex, contestantId, category);
-  if (category !== null) state.revealedAnswers[category] = true;
+  if (category !== null) revealAnswer(state.game, category);
   saveGame();
   renderAnswer();
   renderHistory();
@@ -1147,9 +1216,7 @@ function submitGuess(event) {
     ? guessIsCorrect(round.trackId, selectedCategory, guess)
     : matchingCategories.length === 1;
   resolveGuess(state.game, roundIndex, contestant.id, category, isCorrect);
-  if (isCorrect) {
-    state.revealedAnswers[category] = true;
-  }
+  if (isCorrect) revealAnswer(state.game, category);
   saveGame();
   renderAnswer();
   renderHistory();
@@ -1278,6 +1345,7 @@ function renderHistory() {
 function renderScores() {
   renderRoundScoring();
   renderScoreboard();
+  publishPresentation();
 }
 
 function renderGame() {
@@ -1293,6 +1361,7 @@ function renderGame() {
 function showScreen(name) {
   $('setup').hidden = name !== 'setup';
   $('game').hidden = name !== 'game';
+  publishPresentation();
 }
 
 async function nextSong() {
@@ -1307,7 +1376,6 @@ async function nextSong() {
   const trackIds = [...state.tracks.keys()];
   const trackId = nextRound(state.game, trackIds);
   if (!trackId) throw new Error('The playlist is empty');
-  state.revealedAnswers = { artist: false, title: false, year: false };
   $('guess-feedback').textContent = '';
   $('guess-feedback').className = 'guess-feedback';
   if (state.game.mode === 'im-steve') {
@@ -1374,7 +1442,6 @@ async function enterGame({ fresh }) {
   if (fresh || !currentRound(state.game) || !state.tracks.has(currentRound(state.game).trackId)) {
     await nextSong();
   } else {
-    state.revealedAnswers = { artist: false, title: false, year: false };
     $('guess-feedback').textContent = '';
     const round = currentRound(state.game);
     prefetchYear(round.trackId);
@@ -1570,14 +1637,17 @@ on('replay', 'click', () => {
 });
 for (const category of CATEGORIES) {
   on(`reveal-${category}`, 'click', () => {
-    state.revealedAnswers[category] = true;
+    revealAnswer(state.game, category);
+    saveGame();
     renderAnswer();
     renderHistory();
     if (state.game.mode === 'im-steve' && answersComplete()) finishManualRound();
   });
 }
+on('open-tv', 'click', () => openTvView());
 on('wrong-reveal', 'click', () => {
   revealAllAnswers();
+  saveGame();
   renderAnswer();
   renderHistory();
   if (state.game.mode === 'im-steve') finishManualRound();
