@@ -1282,8 +1282,23 @@ async function startVoiceGuess() {
   const deviceId = selectedDevice === BROWSER_DEVICE || client.isBrowserDevice?.(selectedDevice) ? client.deviceId : selectedDevice;
   let volumeWarning = '';
   const listenSeconds = timings().voiceSeconds;
+  const listeningStatus = () => `Listening — speak now (up to ${seconds(listenSeconds)}).${volumeWarning || ' Music is lowered until this turn ends.'}`;
   const session = new VoiceGuessSession(Recognition, {
     durationMs: listenSeconds * 1000,
+    // The browser hears several possible phrasings; prefer the one that matches an
+    // unrevealed answer so a correct but oddly-spelled name ("Hozier") still counts.
+    pickAlternative: (alternatives) => {
+      const round = currentRound(state.game);
+      if (!round) return alternatives[0];
+      const category = $('guess-category').value;
+      const matches = (text) => (category
+        ? guessIsCorrect(round.trackId, category, text)
+        : matchingGuessCategories(round.trackId, round, text).length === 1);
+      return alternatives.find(matches) ?? alternatives[0];
+    },
+    onListening: () => {
+      if (state.recognition === session && !session.transcript) setStatus(listeningStatus(), Boolean(volumeWarning));
+    },
     lowerVolume: async () => {
       await previousRestoration;
       if (session.closed) return async () => {};
@@ -1317,11 +1332,11 @@ async function startVoiceGuess() {
   });
   state.recognition = session;
   renderGuessControls();
-  setStatus('Preparing voice input and lowering the song. The turn timer keeps running.');
+  setStatus('Starting the microphone… The turn timer keeps running.');
   try {
     await session.start();
-    if (state.recognition === session) {
-      setStatus(`Listening for up to ${seconds(listenSeconds)}.${volumeWarning || ' Music stays lowered until this turn ends.'}`, Boolean(volumeWarning));
+    if (state.recognition === session && session.isCapturing && !session.transcript) {
+      setStatus(listeningStatus(), Boolean(volumeWarning));
     }
   } catch (err) {
     if (state.recognition === session) {

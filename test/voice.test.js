@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { VoiceGuessSession, VOICE_LISTEN_MS } from '../public/js/voice.js';
+import { VoiceGuessSession, VOICE_LISTEN_MS, VOICE_ALTERNATIVES, voiceErrorMessage } from '../public/js/voice.js';
 
 class Recognition {
   starts = 0;
@@ -81,28 +81,86 @@ test('voice capture lasts up to 15 seconds and keeps music lowered until the tur
   assert.equal(events.restores, 1);
 });
 
-test('short browser recognition endings restart within the same bounded capture window', async (t) => {
+test('silences that end browser recognition restart until the listening window closes', async (t) => {
   const tick = installClock(t);
   const { session, events, recognition } = fixture();
   await session.start();
   recognition.onresult({ results: [[{ transcript: 'The' }]] });
-  recognition.onend();
-  await tick(200);
-  assert.equal(recognition.starts, 2);
+  for (let i = 0; i < 5; i++) {
+    recognition.onend();
+    await tick(150);
+  }
+  assert.equal(recognition.starts, 6, 'long thinking pauses do not cut the player off');
   recognition.onresult({ results: [[{ transcript: 'Beatles' }]] });
   assert.equal(events.transcripts.at(-1), 'The Beatles');
-  recognition.onend();
-  await tick(200);
-  assert.equal(recognition.starts, 3);
+  assert.equal(session.isCapturing, true);
+  await tick(20_000);
   recognition.onend();
   await tick(20_000);
-  assert.equal(recognition.starts, 3, 'recognition cannot restart indefinitely');
+  assert.equal(recognition.starts, 6, 'no restart after the window closes');
   assert.equal(session.isCapturing, false);
+  assert.deepEqual(events.ends, ['The Beatles']);
   assert.equal(events.volume, 0.16);
   await session.stop();
 });
 
-test('turn cancellation during a pending volume change restores volume without starting the microphone', async () => {
+test('a recognizer that ends instantly cannot restart forever', async (t) => {
+  const tick = installClock(t);
+  const { session, recognition } = fixture({ durationMs: 10 * 60_000 });
+  await session.start();
+  for (let i = 0; i < 100 && session.isCapturing; i++) {
+    recognition.onend();
+    await tick(150);
+  }
+  assert.equal(session.isCapturing, false);
+  assert.ok(recognition.starts <= 31);
+  await session.stop();
+});
+
+test('the microphone starts before the volume change finishes', async () => {
+  let finishLowering;
+  const { session, events, recognition } = fixture({
+    lowerVolume: () => new Promise((resolve) => { finishLowering = resolve; }),
+  });
+  const start = session.start();
+  assert.equal(recognition.starts, 1, 'first words are not lost while Spotify lowers the volume');
+  recognition.onresult({ results: [[{ transcript: 'Adele' }]] });
+  assert.deepEqual(events.transcripts, ['Adele']);
+  finishLowering(async () => { events.restores += 1; });
+  await start;
+  await session.stop();
+  assert.equal(events.restores, 1);
+});
+
+test('onListening fires once when the browser starts listening, not on restarts', async (t) => {
+  const tick = installClock(t);
+  let listening = 0;
+  const { session, recognition } = fixture({ onListening: () => { listening += 1; } });
+  await session.start();
+  recognition.onstart();
+  recognition.onend();
+  await tick(150);
+  recognition.onstart();
+  assert.equal(listening, 1);
+  await session.stop();
+});
+
+test('alternatives are offered to pickAlternative so a matching hearing wins', async () => {
+  const seen = [];
+  const { session, events, recognition } = fixture({
+    pickAlternative: (alternatives) => { seen.push(alternatives); return alternatives.find((a) => a === 'Hozier'); },
+  });
+  assert.equal(recognition.maxAlternatives, VOICE_ALTERNATIVES);
+  await session.start();
+  recognition.onresult({ results: [[{ transcript: 'hosier ' }, { transcript: 'Hozier' }, { transcript: '' }]] });
+  assert.deepEqual(seen, [['hosier', 'Hozier']]);
+  assert.deepEqual(events.transcripts, ['Hozier']);
+  recognition.onresult({ results: [[{ transcript: 'shade' }, { transcript: 'shady' }]] });
+  assert.equal(events.transcripts.at(-1), 'shade', 'falls back to the top hearing when none match');
+  await session.stop();
+});
+
+test('turn cancellation during a pending volume change aborts the microphone and restores volume', async () => {
   let finishLowering;
   let restores = 0;
   const { session, recognition } = fixture({
@@ -112,7 +170,7 @@ test('turn cancellation during a pending volume change restores volume without s
   const stop = session.stop();
   finishLowering(async () => { restores += 1; });
   await Promise.all([start, stop]);
-  assert.equal(recognition.starts, 0);
+  assert.equal(recognition.aborts, 1);
   assert.equal(restores, 1);
 });
 
@@ -122,7 +180,7 @@ test('a no-speech result is reported while the remaining listening window stays 
   await session.start();
   recognition.onerror({ error: 'no-speech' });
   recognition.onend();
-  await tick(200);
+  await tick(150);
   assert.equal(events.noSpeech, 1);
   assert.deepEqual(events.errors, []);
   assert.equal(recognition.starts, 2);
@@ -131,12 +189,12 @@ test('a no-speech result is reported while the remaining listening window stays 
   await session.stop();
 });
 
-test('microphone startup failures are surfaced while cleanup still restores the original volume', async () => {
+test('microphone startup failures are surfaced without touching the volume', async () => {
   const { session, events, recognition } = fixture();
   recognition.start = () => { throw new Error('Microphone unavailable'); };
   await assert.rejects(session.start(), /Microphone unavailable/);
   await session.stop();
-  assert.equal(events.restores, 1);
+  assert.equal(events.restores, 0);
   assert.equal(events.volume, 0.8);
 });
 
@@ -145,7 +203,7 @@ test('recognition errors stop capture, detach callbacks, and restore volume', as
   await session.start();
   recognition.onerror({ error: 'not-allowed' });
   await session.stop();
-  assert.match(events.errors[0].message, /not-allowed/);
+  assert.match(events.errors[0].message, /Microphone access is blocked/);
   assert.equal(events.restores, 1);
   assert.equal(recognition.onresult, null);
   assert.equal(recognition.onend, null);
@@ -186,4 +244,31 @@ test('late speech results and queued restarts cannot change a different turn', a
   assert.deepEqual(events.transcripts, []);
   assert.equal(recognition.starts, 1);
   assert.equal(events.restores, 1);
+});
+
+test('aborted and a single network blip keep listening; a second network error stops', async (t) => {
+  const tick = installClock(t);
+  const { session, events, recognition } = fixture();
+  await session.start();
+  recognition.onerror({ error: 'aborted' });
+  recognition.onerror({ error: 'network' });
+  recognition.onend();
+  await tick(150);
+  assert.deepEqual(events.errors, []);
+  assert.equal(recognition.starts, 2);
+  recognition.onerror({ error: 'network' });
+  assert.match(events.errors[0].message, /internet connection/);
+  assert.equal(events.restores, 0);
+  await session.stop();
+  assert.equal(events.restores, 1);
+});
+
+test('each recognition error code gets a specific, actionable message', () => {
+  assert.match(voiceErrorMessage('service-not-allowed'), /Allow the microphone/);
+  assert.match(voiceErrorMessage('audio-capture'), /No microphone was found/);
+  assert.match(voiceErrorMessage('language-not-supported'), /English/);
+  assert.match(voiceErrorMessage('bad-grammar'), /\(bad-grammar\)/);
+  for (const code of ['not-allowed', 'audio-capture', 'network', 'weird']) {
+    assert.match(voiceErrorMessage(code), /Type your guess instead/);
+  }
 });
