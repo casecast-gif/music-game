@@ -56,6 +56,15 @@
           <button id="start" type="button" class="primary" disabled>Start game</button>
           <button id="resume" type="button" hidden>Resume game</button>
         </div>
+        <section id="preflight" class="preflight" hidden aria-live="polite">
+          <h3>Spotify check</h3>
+          <ul id="preflight-checks" class="preflight-checks"></ul>
+          <div class="row">
+            <button id="preflight-retry" type="button" class="primary">Check again</button>
+            <button id="preflight-login" type="button" hidden>Log in with Spotify</button>
+            <button id="preflight-anyway" type="button" class="secondary">Start anyway</button>
+          </div>
+        </section>
 
         <details id="setup-settings" class="settings">
           <summary>⚙ Settings &amp; troubleshooting</summary>
@@ -136,6 +145,15 @@
               <button id="wrong-reveal" type="button" hidden>Wrong — reveal all</button>
               <button id="next" type="button" class="secondary">Skip song</button>
             </div>
+            <section id="playback-help" class="playback-help" hidden role="alert">
+              <p id="playback-help-message"></p>
+              <div class="row">
+                <button id="playback-retry" type="button" class="primary small">↻ Try the song again</button>
+                <button id="playback-use-browser" type="button" class="secondary small">🔊 Play in this browser</button>
+                <button id="playback-dismiss" type="button" class="secondary small">It's playing — hide</button>
+              </div>
+              <p class="hint">Or open Spotify on your phone or speaker, press ↻ Refresh devices below and pick it.</p>
+            </section>
             <div class="row">
               <label class="inline">
                 Play on

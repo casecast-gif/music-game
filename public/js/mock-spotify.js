@@ -26,6 +26,10 @@ export class MockSpotifyClient {
     this.volume = 0.8;
   }
 
+  async getProfile() {
+    return { id: 'mock-host', display_name: 'Mock host', product: 'premium' };
+  }
+
   async getPlaylistName() {
     return MOCK_PLAYLIST_NAME;
   }

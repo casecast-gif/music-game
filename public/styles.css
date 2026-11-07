@@ -36,6 +36,18 @@ code { background: #2a2a2a; padding: 0.1rem 0.35rem; border-radius: 4px; }
 .status.error { color: var(--danger); }
 .actions { margin-top: 1.25rem; }
 
+.preflight, .playback-help { margin: 0.75rem 0; padding: 0.75rem 1rem; border: 1px solid var(--danger); border-radius: 10px; background: rgba(226, 80, 76, 0.08); }
+.preflight h3 { margin: 0 0 0.5rem; }
+.playback-help p { margin: 0 0 0.25rem; }
+.preflight-checks { list-style: none; padding: 0; margin: 0 0 0.25rem; display: grid; gap: 0.4rem; }
+.preflight-checks li::before { display: inline-block; width: 1.5em; }
+.preflight-checks li.ok::before { content: '✅'; }
+.preflight-checks li.warn::before { content: '⚠️'; }
+.preflight-checks li.fail::before { content: '❌'; }
+.preflight-checks li.skip::before { content: '⏸'; }
+.preflight-checks li.pending::before { content: '⏳'; }
+.preflight-checks strong { margin-right: 0.4rem; }
+
 .connection-summary { display: flex; flex-wrap: wrap; gap: 1rem; color: var(--muted); }
 .connection-summary strong { color: var(--text); font-weight: 600; }
 .game-modes { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1rem; }

@@ -40,6 +40,7 @@ import { MOCK_PLAYLIST_NAME, MOCK_TRACKS, MockSpotifyClient } from './mock-spoti
 import { PlaylistLoader } from './playlist.js';
 import { VoiceGuessSession } from './voice.js';
 import { settleWithin } from './async-utils.js';
+import { runPreflight, summarizePreflight } from './preflight.js';
 import { cleanTitle, formatYear, guessMatchCategories, guessMatches, resolveOriginalYear, yearFromDate } from './year.js';
 
 const KEYS = {
@@ -600,7 +601,30 @@ async function refreshDevices() {
   return devices;
 }
 
+// ---------- Playback recovery ----------
+
+function showPlaybackHelp(message) {
+  $('playback-help-message').textContent = message;
+  const onBrowser = state.selectedDeviceId === BROWSER_DEVICE || spotify().isBrowserDevice?.($('device').value);
+  $('playback-use-browser').hidden = Boolean(onBrowser) || Boolean(spotify().isMock);
+  $('playback-help').hidden = false;
+}
+
+function hidePlaybackHelp() {
+  $('playback-help').hidden = true;
+}
+
 async function playCurrent() {
+  try {
+    await playCurrentTrack();
+    hidePlaybackHelp();
+  } catch (err) {
+    showPlaybackHelp(`The song did not start: ${err?.message ?? err}`);
+    throw err;
+  }
+}
+
+async function playCurrentTrack() {
   const round = currentRound(state.game);
   const track = round && state.tracks.get(round.trackId);
   if (!track) return;
@@ -669,7 +693,10 @@ async function startRoundPlayback(round) {
     if (stillCurrent()) setStatus(playbackWarning(outcome.reason), true);
     console.error(outcome.reason);
   } else if (outcome.status === 'timeout') {
-    if (stillCurrent()) setStatus('Spotify has not confirmed playback yet. Guessing is open — if the song is not audible, press Play.', true);
+    if (stillCurrent()) {
+      setStatus('Spotify has not confirmed playback yet. Guessing is open — if the song is not audible, press Play.', true);
+      showPlaybackHelp('Spotify has not confirmed that the song started. If you can hear it, hide this.');
+    }
     playback.catch((err) => {
       console.error(err);
       if (stillCurrent()) setStatus(playbackWarning(err), true);
@@ -1477,6 +1504,58 @@ async function enterGame({ fresh }) {
   void topUpPlaylist().catch(reportError);
 }
 
+// ---------- Preflight ----------
+
+let pendingStart = null;
+
+function renderPreflight(checks) {
+  $('preflight-checks').replaceChildren(...checks.map((check) => {
+    const li = document.createElement('li');
+    li.className = check.status;
+    const label = document.createElement('strong');
+    label.textContent = check.label;
+    li.append(label, check.detail);
+    return li;
+  }));
+}
+
+/** Runs the Spotify preflight, then enters the game when nothing failed. */
+async function startWithPreflight(options) {
+  pendingStart = options;
+  spotify().activate(); // inside the click gesture, so browser audio may start later
+  $('preflight').hidden = false;
+  $('preflight-login').hidden = true;
+  renderPreflight([{ label: 'Spotify', status: 'pending', detail: 'Checking login and playback device…' }]);
+  setStatus('Checking Spotify before the game starts…');
+  for (const id of ['start', 'resume', 'preflight-retry', 'preflight-anyway']) $(id).disabled = true;
+  let result;
+  try {
+    result = await runPreflight(spotify(), {
+      selectedDeviceId: state.selectedDeviceId,
+      browserDeviceId: BROWSER_DEVICE,
+      startBrowserPlayer: () => ensurePlayer(),
+    });
+  } finally {
+    $('preflight-retry').disabled = false;
+    $('preflight-anyway').disabled = false;
+    renderSetup();
+  }
+  if (result.useBrowser) {
+    state.selectedDeviceId = BROWSER_DEVICE;
+    localStorage.setItem(KEYS.deviceId, BROWSER_DEVICE);
+  }
+  renderPreflight(result.checks);
+  if (!result.ok) {
+    $('preflight-login').hidden = !result.loginProblem || state.spotifyApiMode !== 'live';
+    setStatus(summarizePreflight(result), true);
+    return;
+  }
+  $('preflight').hidden = true;
+  pendingStart = null;
+  setStatus(summarizePreflight(result));
+  await enterGame(options);
+}
+
 // ---------- Events ----------
 
 function on(id, event, handler) {
@@ -1573,8 +1652,28 @@ on('target-score', 'change', () => {
   setStatus(`Target score saved: ${targetScore} points`);
 });
 
-on('start', 'click', () => enterGame({ fresh: true }));
-on('resume', 'click', () => enterGame({ fresh: false }));
+on('start', 'click', () => startWithPreflight({ fresh: true }));
+on('resume', 'click', () => startWithPreflight({ fresh: false }));
+on('preflight-retry', 'click', () => startWithPreflight(pendingStart ?? { fresh: true }));
+on('preflight-anyway', 'click', () => {
+  const options = pendingStart ?? { fresh: true };
+  $('preflight').hidden = true;
+  pendingStart = null;
+  return enterGame(options);
+});
+on('preflight-login', 'click', () => $('spotify-form').requestSubmit());
+on('playback-retry', 'click', () => {
+  spotify().activate();
+  return playCurrent();
+});
+on('playback-use-browser', 'click', async () => {
+  spotify().activate();
+  state.selectedDeviceId = BROWSER_DEVICE;
+  localStorage.setItem(KEYS.deviceId, BROWSER_DEVICE);
+  $('device').value = spotify().deviceId || BROWSER_DEVICE;
+  return playCurrent();
+});
+on('playback-dismiss', 'click', () => hidePlaybackHelp());
 on('mode-no-steve', 'click', () => selectMode('no-steve'));
 on('mode-im-steve', 'click', () => selectMode('im-steve'));
 on('start-manual-clock', 'click', () => startManualClock());
@@ -1707,6 +1806,7 @@ on('back-to-setup', 'click', async () => {
   } else {
     await spotify().pause(deviceId || undefined).catch(() => {});
   }
+  hidePlaybackHelp();
   showScreen('setup');
   renderSetup();
 });
