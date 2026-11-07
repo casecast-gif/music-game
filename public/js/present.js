@@ -1,6 +1,7 @@
 // TV / audience view. Renders the snapshot the host screen publishes (see publishPresentation in
 // app.js). It never sees hidden answers: the host only sends answers that have been revealed.
-import { CATEGORIES, clockUrgency, turnClockReading } from './game.js';
+import { CATEGORIES, MANUAL_TURN_SECONDS, clockUrgency, turnClockReading } from './game.js';
+import { showClockCallout } from './clock-callout.js';
 import { PRESENT_CHANNEL, PRESENT_STORAGE_KEY } from './present-sync.js';
 
 const $ = (id) => document.getElementById(id);
@@ -135,6 +136,17 @@ function render() {
   }
   renderStandings(s);
   renderClock();
+  maybeShowCallout(s);
+}
+
+let calloutDeadline = null;
+/** Splash once per I'm Steve clock, and only if it just started (not when the TV reloads mid-count). */
+function maybeShowCallout(s) {
+  const clock = s.clock;
+  if (!clock?.manual || !clockRunning(s) || clock.deadlineAt === calloutDeadline) return;
+  calloutDeadline = clock.deadlineAt;
+  const startedAgo = Date.now() - (clock.deadlineAt - MANUAL_TURN_SECONDS * 1000);
+  if (startedAgo < 3000) showClockCallout($('present-clock'));
 }
 
 if (typeof BroadcastChannel === 'function') {

@@ -43,6 +43,7 @@ import { PlaylistLoader } from './playlist.js';
 import { VoiceGuessSession } from './voice.js';
 import { settleWithin } from './async-utils.js';
 import { playBuzzer, playTick, unlockTicks } from './tick-sound.js';
+import { showClockCallout } from './clock-callout.js';
 import { runPreflight, summarizePreflight } from './preflight.js';
 import { cleanTitle, formatYear, guessMatchCategories, guessMatches, resolveOriginalYear, yearFromDate } from './year.js';
 
@@ -1774,6 +1775,7 @@ on('mode-im-steve', 'click', () => selectMode('im-steve'));
 on('start-manual-clock', 'click', () => {
   unlockTicks(); // browsers only allow audio after a tap, so unlock it on this one
   startManualClock();
+  showClockCallout($('turn-clock')); // after startManualClock so the clock is visible to fly into
 });
 on('open-music-settings', 'click', () => {
   const settings = $('setup-settings');

@@ -222,6 +222,43 @@ aside .score-table td:nth-child(2), aside .score-table th:nth-child(2) { text-al
 .turn-bar-fill { height: 100%; background: var(--urgency); border-radius: inherit; transition: width 0.25s linear; }
 .turn-banner [hidden], .present-banner [hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) { .turn-banner .turn-clock, .present-clock { animation: none !important; } }
+
+/* "PUT THE CLOCK ON EM!" splash (clock-callout.js): slam in, wobble, then fly into the clock. */
+.clock-callout {
+  position: fixed; inset: 0; z-index: 100; pointer-events: none;
+  display: grid; place-items: center; overflow: hidden;
+  animation: callout-backdrop 1.9s ease-out forwards;
+}
+.clock-callout-text {
+  display: grid; justify-items: center; text-align: center; line-height: 0.95;
+  font-size: min(12vw, 20vh); font-weight: 900; text-transform: uppercase; letter-spacing: 0.02em;
+  color: var(--warn); -webkit-text-stroke: max(2px, 0.25vmin) #000;
+  text-shadow: 0 0.06em 0 var(--danger), 0 0.12em 0.25em rgba(0, 0, 0, 0.7);
+  animation: callout-text 1.9s cubic-bezier(0.3, 0, 0.3, 1) forwards;
+}
+.clock-callout-text span:last-child { color: #fff; }
+@keyframes callout-backdrop {
+  0% { background: rgba(226, 80, 76, 0); }
+  10% { background: rgba(226, 80, 76, 0.45); }
+  25% { background: rgba(10, 10, 10, 0.7); }
+  60% { background: rgba(10, 10, 10, 0.7); }
+  100% { background: rgba(10, 10, 10, 0); }
+}
+@keyframes callout-text {
+  0% { transform: scale(0.2) rotate(-14deg); opacity: 0; }
+  12% { transform: scale(1.15) rotate(-3deg); opacity: 1; }
+  20% { transform: scale(0.94) rotate(-6deg); }
+  27% { transform: scale(1) rotate(-4deg); }
+  36% { transform: scale(1.03) rotate(-5deg); }
+  45% { transform: scale(1) rotate(-3.5deg); }
+  60% { transform: translate(0, 0) scale(1) rotate(-4deg); opacity: 1; }
+  92% { opacity: 0.9; } /* stay visible until it lands on the clock */
+  100% { transform: translate(var(--to-x, 0), var(--to-y, 0)) scale(0.06) rotate(0deg); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .clock-callout-text { animation: callout-fade 1.9s ease-in-out forwards; }
+  @keyframes callout-fade { 0%, 100% { opacity: 0; transform: rotate(-4deg); } 15%, 70% { opacity: 1; transform: rotate(-4deg); } }
+}
 .guess-form label { color: var(--text); }
 .guess-actions { display: flex; gap: 0.6rem; grid-column: 2; }
 .guess-feedback { min-height: 1.4em; margin: 0.6rem 0 0; font-weight: 600; }
