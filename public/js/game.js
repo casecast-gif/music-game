@@ -117,7 +117,17 @@ export function createGame({ playlistId = null, contestants = [], targetScore = 
     timings: normalizeTimings(timings),
     deck: [], // remaining track ids to play, in order
     rounds: [], // { trackId, awards: { [contestantId]: { artist, title, year } } }
+    // Who guesses first on the next song. Rotates every song and survives resetScores,
+    // so the start of each new game continues the rotation instead of going back to A.
+    nextStarterId: contestants[0]?.id ?? null,
   };
+}
+
+/** The contestant who will guess first on the next song. */
+export function nextStarter(game) {
+  if (!game.contestants.length) return null;
+  const saved = game.contestants.find((c) => c.id === game.nextStarterId);
+  return saved ?? game.contestants[game.rounds.length % game.contestants.length];
 }
 
 export function addContestant(game, contestant) {
@@ -131,6 +141,10 @@ export function addContestant(game, contestant) {
 export function removeContestant(game, contestantId) {
   const removedIndex = game.contestants.findIndex((c) => c.id === contestantId);
   game.contestants = game.contestants.filter((c) => c.id !== contestantId);
+  if (game.nextStarterId === contestantId) {
+    // The player who would have followed the removed one starts the next song instead.
+    game.nextStarterId = game.contestants.length ? game.contestants[removedIndex % game.contestants.length].id : null;
+  }
   for (const round of game.rounds) {
     delete round.awards[contestantId];
     round.out = (round.out ?? []).filter((id) => id !== contestantId);
@@ -181,14 +195,18 @@ export function nextRound(game, trackIds, rng = Math.random) {
   if (game.deck.length === 0) buildDeck(game, trackIds, rng);
   const trackId = game.deck.shift();
   if (!trackId) return null;
-  const startingContestantIndex = game.contestants.length ? game.rounds.length % game.contestants.length : 0;
+  const starter = nextStarter(game);
+  if (starter) {
+    const starterIndex = game.contestants.indexOf(starter);
+    game.nextStarterId = game.contestants[(starterIndex + 1) % game.contestants.length].id;
+  }
   game.rounds.push({
     trackId,
     awards: {},
     out: [],
     attempted: [],
     boardActive: false,
-    currentTurnId: game.contestants[startingContestantIndex]?.id ?? null,
+    currentTurnId: starter?.id ?? null,
     turnDeadlineAt: null,
     turnSeconds: null,
     listenDeadlineAt: null,
@@ -420,7 +438,7 @@ export function standings(game) {
   return rows;
 }
 
-/** Clears all scores and played songs but keeps contestants and playlist. */
+/** Clears all scores and played songs but keeps contestants, playlist and the starter rotation. */
 export function resetScores(game) {
   game.rounds = [];
   game.deck = [];
@@ -438,7 +456,13 @@ export function deserializeGame(json) {
     const contestants = data.contestants
       .filter((c) => c && typeof c.id === 'string' && typeof c.name === 'string')
       .map((c) => ({ id: c.id, name: c.name, members: Array.isArray(c.members) ? c.members.map(String) : [] }));
+    const roundCount = data.rounds.filter((r) => r && typeof r.trackId === 'string').length;
+    const nextStarterId = contestants.some((c) => c.id === data.nextStarterId)
+      ? data.nextStarterId
+      // Saves from before the rotation pointer used rounds.length % contestants.length.
+      : contestants.length ? contestants[roundCount % contestants.length].id : null;
     return {
+      nextStarterId,
       playlistId: typeof data.playlistId === 'string' ? data.playlistId : null,
       contestants,
       targetScore: Number.isSafeInteger(data.targetScore) && data.targetScore > 0 ? data.targetScore : DEFAULT_TARGET_SCORE,

@@ -133,6 +133,83 @@ test('No Steve rotates the starting contestant and begins with guessing immediat
   assert.equal(game.rounds[1].turnDeadlineAt, null);
 });
 
+function rotationGame(mode, names = ['A', 'B', 'C']) {
+  const game = createGame({ mode });
+  const players = names.map((name) => createContestant(name));
+  for (const player of players) addContestant(game, player);
+  return { game, players };
+}
+
+function starters(game, count) {
+  const names = [];
+  for (let i = 0; i < count; i++) {
+    nextRound(game, ['s1', 's2', 's3', 's4', 's5', 's6', 's7']);
+    names.push(currentTurn(game).name);
+  }
+  return names;
+}
+
+for (const mode of ['no-steve', 'im-steve']) {
+  test(`${mode}: each song starts with the next player and loops back to the first`, () => {
+    const { game } = rotationGame(mode);
+    assert.deepEqual(starters(game, 7), ['A', 'B', 'C', 'A', 'B', 'C', 'A']);
+  });
+
+  test(`${mode}: the starter rotation continues through resetScores and a save/restore`, () => {
+    const { game } = rotationGame(mode);
+    assert.deepEqual(starters(game, 2), ['A', 'B']);
+    resetScores(game); // new game
+    assert.deepEqual(starters(game, 1), ['C']);
+    const restored = deserializeGame(serializeGame(game));
+    resetScores(restored);
+    assert.deepEqual(starters(restored, 2), ['A', 'B']);
+  });
+
+  test(`${mode}: within a song, first attempts go in order from the starter, then correct players cycle`, () => {
+    const { game, players: [a, b, c] } = rotationGame(mode);
+    starters(game, 1); // A started song 1
+    nextRound(game, ['s1', 's2', 's3', 's4']); // B starts song 2
+    assert.equal(currentTurn(game).id, b.id);
+    resolveManualTurn(game, 1, b.id, 'artist'); // B correct: stays in
+    assert.equal(currentTurn(game).id, c.id);
+    resolveManualTurn(game, 1, c.id, null); // C wrong: out
+    assert.equal(currentTurn(game).id, a.id);
+    resolveManualTurn(game, 1, a.id, null); // A wrong: out
+    assert.equal(currentTurn(game).id, b.id, 'lone correct player keeps guessing');
+    resolveManualTurn(game, 1, b.id, 'title');
+    assert.equal(currentTurn(game).id, b.id);
+    resolveManualTurn(game, 1, b.id, 'year');
+    assert.equal(currentTurn(game), null, 'song ends when all elements are guessed');
+    nextRound(game, ['s1', 's2', 's3', 's4']);
+    assert.equal(currentTurn(game).id, c.id);
+  });
+}
+
+test('adding and removing players keeps the starter rotation sensible', () => {
+  const { game, players: [, b] } = rotationGame('no-steve');
+  assert.deepEqual(starters(game, 1), ['A']);
+  removeContestant(game, b.id); // B was due next: whoever followed B (C) starts instead
+  assert.deepEqual(starters(game, 2), ['C', 'A']);
+  addContestant(game, createContestant('D')); // joins the end of the order
+  assert.deepEqual(starters(game, 3), ['C', 'D', 'A']);
+  const { game: last, players: [, , c] } = rotationGame('no-steve');
+  starters(last, 2); // C is next
+  removeContestant(last, c.id); // wraps around to A
+  assert.deepEqual(starters(last, 1), ['A']);
+});
+
+test('saves from before the starter pointer continue the old rotation', () => {
+  const a = createContestant('A');
+  const b = createContestant('B');
+  const c = createContestant('C');
+  const restored = deserializeGame(JSON.stringify({
+    mode: 'no-steve',
+    contestants: [a, b, c],
+    rounds: [{ trackId: 'one', awards: {} }, { trackId: 'two', awards: {} }],
+  }));
+  assert.equal(restored.nextStarterId, c.id);
+});
+
 test("I'm Steve rounds retain the manual scoring phase", () => {
   const game = createGame({ mode: 'im-steve' });
   addContestant(game, createContestant('A'));
