@@ -192,6 +192,8 @@ aside .score-table td:nth-child(2), aside .score-table th:nth-child(2) { text-al
 #round-scoring tr.current-turn td { background: #203328; }
 #round-scoring tr.out td { color: var(--muted); }
 #round-scoring tr.out .toggle { opacity: 0.35; }
+.manual-clock-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 1rem; margin: 0.5rem 0 0.75rem; }
+.manual-clock-controls[hidden] { display: none; }
 .auto-turn { margin: 0.75rem 0 1rem; padding: 1rem; border: 1px solid var(--border); border-radius: 10px; background: #202020; }
 .guess-form { display: grid; grid-template-columns: minmax(8rem, 0.6fr) minmax(12rem, 1fr); align-items: center; gap: 0.6rem 0.8rem; }
 

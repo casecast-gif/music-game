@@ -11,7 +11,11 @@ import {
   updateTimings,
   clockUrgency,
   guessTimeLimitSeconds,
+  MANUAL_DISPLAY_SECONDS,
+  MANUAL_TURN_SECONDS,
+  manualClockDisplaySeconds,
   secondsLeft,
+  turnClockReading,
   upNextTurn,
   currentRound,
   currentTurn,
@@ -54,6 +58,28 @@ test('parsePlaylistId handles share links, URIs and bare IDs', () => {
 
 test('default playlist is the configured party playlist', () => {
   assert.equal(parsePlaylistId(DEFAULT_PLAYLIST_URL), ID);
+});
+
+test("I'm Steve clock shows ten seconds while timing out after fifteen", () => {
+  const deadlineAt = MANUAL_TURN_SECONDS * 1000;
+  assert.equal(MANUAL_DISPLAY_SECONDS, 10);
+  assert.equal(MANUAL_TURN_SECONDS, 15);
+  assert.equal(manualClockDisplaySeconds(deadlineAt, 0), 10);
+  assert.equal(manualClockDisplaySeconds(deadlineAt, 5_000), 5);
+  assert.equal(manualClockDisplaySeconds(deadlineAt, 10_000), 0);
+  assert.equal(manualClockDisplaySeconds(deadlineAt, deadlineAt), 0);
+});
+
+test('turnClockReading gives the display seconds and bar fill for both clock kinds', () => {
+  assert.equal(turnClockReading(null), null);
+  const manual = { deadlineAt: 15_000, seconds: 10, manual: true };
+  assert.deepEqual(turnClockReading(manual, 0), { left: 10, fraction: 1 });
+  assert.deepEqual(turnClockReading(manual, 5_000), { left: 5, fraction: 0.5 });
+  assert.deepEqual(turnClockReading(manual, 12_000), { left: 0, fraction: 0 }, 'grace period shows an empty clock');
+  const timed = { deadlineAt: 20_000, seconds: 20, manual: false };
+  assert.deepEqual(turnClockReading(timed, 0), { left: 20, fraction: 1 });
+  assert.deepEqual(turnClockReading(timed, 15_000), { left: 5, fraction: 0.25 });
+  assert.deepEqual(turnClockReading(timed, 30_000), { left: 0, fraction: 0 });
 });
 
 test('turn clock rounds up and turns amber at 10 s, red at 5 s', () => {
@@ -648,11 +674,13 @@ test('presentationSnapshot includes standings, live round state and the clock', 
   assert.deepEqual(snap.standings.map((row) => [row.name, row.total, row.rank]), [['Ann', 1, 1], ['Bob', 0, 2]]);
   assert.deepEqual(snap.standings[1].members, ['B1', 'B2']);
   assert.deepEqual(snap.round.find((row) => row.name === 'Bob'), { name: 'Bob', points: 0, out: false, current: true });
-  assert.equal(snap.clock, null, "I'm Steve never shows a clock");
+  assert.deepEqual(snap.clock, { deadlineAt: 5000, seconds: MANUAL_DISPLAY_SECONDS, manual: true });
   assert.equal(snap.upNextName, 'Ann');
   game.mode = 'no-steve';
   currentRound(game).turnSeconds = 20;
-  assert.deepEqual(presentationSnapshot(game).clock, { deadlineAt: 5000, seconds: 20 });
+  assert.deepEqual(presentationSnapshot(game).clock, { deadlineAt: 5000, seconds: 20, manual: false });
+  currentRound(game).turnDeadlineAt = null;
+  assert.equal(presentationSnapshot(game).clock, null);
   assert.equal(presentationSnapshot(createGame()).roundNumber, 0);
 });
 

@@ -1,6 +1,6 @@
 // TV / audience view. Renders the snapshot the host screen publishes (see publishPresentation in
 // app.js). It never sees hidden answers: the host only sends answers that have been revealed.
-import { CATEGORIES, clockUrgency, secondsLeft } from './game.js';
+import { CATEGORIES, clockUrgency, turnClockReading } from './game.js';
 import { PRESENT_CHANNEL, PRESENT_STORAGE_KEY } from './present-sync.js';
 
 const $ = (id) => document.getElementById(id);
@@ -23,7 +23,7 @@ function accept(next) {
 }
 
 function clockRunning(s) {
-  return Boolean(s?.clock?.deadlineAt) && !s.complete && s.phase === 'turn';
+  return Boolean(s?.clock?.deadlineAt) && turnActive(s);
 }
 
 function turnActive(s) {
@@ -109,18 +109,12 @@ function renderStandings(s) {
 }
 
 function renderClock() {
-  const now = Date.now();
-  const running = clockRunning(snapshot);
-  const left = running ? secondsLeft(snapshot.clock.deadlineAt, now) : null;
-  $('present-clock').hidden = !running;
-  $('present-clock').textContent = running ? String(left) : '';
-  $('present-banner').dataset.urgency = clockUrgency(left);
-  const total = snapshot?.clock?.seconds;
-  $('present-bar').hidden = !running || !total;
-  if (running && total) {
-    const fraction = Math.max(0, snapshot.clock.deadlineAt - now) / (total * 1000);
-    $('present-bar-fill').style.width = `${Math.min(100, fraction * 100)}%`;
-  }
+  const reading = clockRunning(snapshot) ? turnClockReading(snapshot.clock) : null;
+  $('present-clock').hidden = !reading;
+  $('present-clock').textContent = reading ? String(reading.left) : '';
+  $('present-banner').dataset.urgency = clockUrgency(reading?.left ?? null);
+  $('present-bar').hidden = !reading;
+  $('present-bar-fill').style.width = `${(reading?.fraction ?? 0) * 100}%`;
 }
 
 function render() {

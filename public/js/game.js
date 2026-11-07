@@ -5,6 +5,29 @@ export const CATEGORY_LABELS = { artist: 'Artist', title: 'Song', year: 'Year' }
 export const DEFAULT_TARGET_SCORE = 15;
 export const FIRST_GUESS_SECONDS = 60;
 export const FOLLOWUP_GUESS_SECONDS = 20;
+// I'm Steve "Put the clock on em": shows 10 → 0, but the player is only out after 15 s (5 s grace at 0).
+export const MANUAL_TURN_SECONDS = 15;
+export const MANUAL_DISPLAY_SECONDS = 10;
+
+export function manualClockDisplaySeconds(deadlineAt, now = Date.now()) {
+  const elapsed = MANUAL_TURN_SECONDS * 1000 - (deadlineAt - now);
+  return Math.min(MANUAL_DISPLAY_SECONDS, Math.max(0, Math.ceil((MANUAL_DISPLAY_SECONDS * 1000 - elapsed) / 1000)));
+}
+
+/**
+ * What a turn clock shows right now: `left` = whole seconds on the display, `fraction` = how full
+ * the bar is (1 → 0). `clock` is { deadlineAt, seconds, manual } as in presentationSnapshot.
+ */
+export function turnClockReading(clock, now = Date.now()) {
+  if (!clock?.deadlineAt) return null;
+  if (clock.manual) {
+    const graceMs = (MANUAL_TURN_SECONDS - MANUAL_DISPLAY_SECONDS) * 1000;
+    const fraction = (clock.deadlineAt - now - graceMs) / (MANUAL_DISPLAY_SECONDS * 1000);
+    return { left: manualClockDisplaySeconds(clock.deadlineAt, now), fraction: Math.min(1, Math.max(0, fraction)) };
+  }
+  const fraction = clock.seconds ? (clock.deadlineAt - now) / (clock.seconds * 1000) : 0;
+  return { left: secondsLeft(clock.deadlineAt, now), fraction: Math.min(1, Math.max(0, fraction)) };
+}
 
 /** Seconds left on a turn clock, rounded up so the display reaches 0 exactly at the deadline. */
 export function secondsLeft(deadlineAt, now = Date.now()) {
@@ -269,9 +292,11 @@ export function presentationSnapshot(game, { answers = {}, phase = null, now = D
     phase: phase ?? round?.phase ?? 'idle',
     turnName: turn?.name ?? null,
     upNextName: upNextTurn(game)?.name ?? null,
-    // Only No Steve runs a turn clock; in I'm Steve the host paces the turns.
-    clock: game.mode === 'no-steve' && round?.turnDeadlineAt
-      ? { deadlineAt: round.turnDeadlineAt, seconds: round.turnSeconds ?? null }
+    // No Steve runs a clock every turn; I'm Steve only when the host taps "Put the clock on em".
+    clock: round?.turnDeadlineAt
+      ? game.mode === 'im-steve'
+        ? { deadlineAt: round.turnDeadlineAt, seconds: MANUAL_DISPLAY_SECONDS, manual: true }
+        : { deadlineAt: round.turnDeadlineAt, seconds: round.turnSeconds ?? null, manual: false }
       : null,
     answers: Object.fromEntries(CATEGORIES.map((category) => [
       category,
