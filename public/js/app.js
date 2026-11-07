@@ -30,6 +30,7 @@ import { SpotifyClient, handleRedirect, isLoggedIn, logout, redirectUri, startLo
 import { MOCK_PLAYLIST_NAME, MOCK_TRACKS, MockSpotifyClient } from './mock-spotify.js';
 import { PlaylistLoader } from './playlist.js';
 import { VoiceGuessSession } from './voice.js';
+import { settleWithin } from './async-utils.js';
 import { cleanTitle, formatYear, guessMatchCategories, guessMatches, resolveOriginalYear, yearFromDate } from './year.js';
 
 const KEYS = {
@@ -49,6 +50,8 @@ const BROWSER_DEVICE = '__browser__';
 const EMBEDDED_DEVICE = '__spotify_embed__';
 const EMBEDDED_CHANNEL = 'music-game-spotify-player';
 const ROUND_REVEAL_MS = 6_000;
+// Longest a new round waits for Spotify to confirm playback before guessing opens anyway.
+const PLAYBACK_WAIT_MS = 5_000;
 const $ = (id) => document.getElementById(id);
 let embeddedPlayerWindow = null;
 let embeddedPlayerReady = false;
@@ -507,6 +510,33 @@ async function playCurrent() {
     if (err.status === 403) throw new Error(`Spotify refused playback: ${err.message}. Premium is required for playback control.`);
     throw err;
   }
+}
+
+function playbackWarning(err) {
+  return `Playback problem: ${err?.message ?? err} Guessing is open anyway — if the song is audible, carry on; otherwise press Play or pick another device.`;
+}
+
+/**
+ * Starts the round's song without letting playback decide whether the round
+ * proceeds. Waits up to PLAYBACK_WAIT_MS so the guess timer usually starts with
+ * the music, then returns; failures (now or later) are shown as warnings.
+ * Resolves to true when playback was confirmed in time.
+ */
+async function startRoundPlayback(round) {
+  const playback = playCurrent();
+  const outcome = await settleWithin(playback, PLAYBACK_WAIT_MS);
+  const stillCurrent = () => currentRound(state.game) === round;
+  if (outcome.status === 'rejected') {
+    if (stillCurrent()) setStatus(playbackWarning(outcome.reason), true);
+    console.error(outcome.reason);
+  } else if (outcome.status === 'timeout') {
+    if (stillCurrent()) setStatus('Spotify has not confirmed playback yet. Guessing is open — if the song is not audible, press Play.', true);
+    playback.catch((err) => {
+      console.error(err);
+      if (stillCurrent()) setStatus(playbackWarning(err), true);
+    });
+  }
+  return outcome.status === 'fulfilled';
 }
 
 // ---------- Years ----------
@@ -1200,10 +1230,11 @@ async function nextSong() {
     renderGame();
     prefetchYear(trackId);
     if (state.game.deck[0]) prefetchYear(state.game.deck[0]);
-    await playCurrent();
-    setStatus(state.spotifyApiMode === 'mock'
-      ? 'Mock song selected (silent). Use the scoring controls to judge each guess.'
-      : 'Song playing. Use the scoring controls to judge each guess.');
+    if (await startRoundPlayback(round) && currentRound(state.game) === round) {
+      setStatus(state.spotifyApiMode === 'mock'
+        ? 'Mock song selected (silent). Use the scoring controls to judge each guess.'
+        : 'Song playing. Use the scoring controls to judge each guess.');
+    }
     void topUpPlaylist().catch(reportError);
     return;
   }
@@ -1211,11 +1242,16 @@ async function nextSong() {
   renderGame();
   prefetchYear(trackId);
   if (state.game.deck[0]) prefetchYear(state.game.deck[0]);
-  await playCurrent();
+  const round = currentRound(state.game);
+  const playing = await startRoundPlayback(round);
+  // Skip/Next during the playback wait already moved on; don't reopen an old round.
+  if (currentRound(state.game) !== round || state.roundPhase !== 'idle') return;
   startTurnClock();
-  setStatus(state.spotifyApiMode === 'mock'
-    ? 'Mock round (silent playback). Guess now; playback continues until the next song.'
-    : 'Guess now. The song keeps playing until the next song starts.');
+  if (playing) {
+    setStatus(state.spotifyApiMode === 'mock'
+      ? 'Mock round (silent playback). Guess now; playback continues until the next song.'
+      : 'Guess now. The song keeps playing until the next song starts.');
+  }
   void topUpPlaylist().catch(reportError);
 }
 
@@ -1263,14 +1299,15 @@ async function enterGame({ fresh }) {
         setStatus('Game resumed — press Play to continue the current song.');
       }
     } else {
-      await playCurrent();
+      const playing = await startRoundPlayback(round);
+      if (currentRound(state.game) !== round) return;
       if (['reveal', 'game-over'].includes(round.phase)
         || !currentTurn(state.game)
         || scoredCategories(round, state.game.contestants).length === CATEGORIES.length) {
         finishRound();
       } else {
         startTurnClock({ resume: true });
-        setStatus(`Game resumed — ${currentTurn(state.game)?.name}’s turn (${guessTimeLimitSeconds(round)}-second limit). Music continues playing.`);
+        if (playing) setStatus(`Game resumed — ${currentTurn(state.game)?.name}’s turn (${guessTimeLimitSeconds(round)}-second limit). Music continues playing.`);
       }
     }
   }
