@@ -9,10 +9,10 @@ import {
   TIMING_LIMITS,
   normalizeTimings,
   updateTimings,
-  MANUAL_DISPLAY_SECONDS,
-  MANUAL_TURN_SECONDS,
+  clockUrgency,
   guessTimeLimitSeconds,
-  manualClockDisplaySeconds,
+  secondsLeft,
+  upNextTurn,
   currentRound,
   currentTurn,
   deserializeGame,
@@ -56,14 +56,17 @@ test('default playlist is the configured party playlist', () => {
   assert.equal(parsePlaylistId(DEFAULT_PLAYLIST_URL), ID);
 });
 
-test("I'm Steve clock shows ten seconds while timing out after fifteen", () => {
-  const deadlineAt = MANUAL_TURN_SECONDS * 1000;
-  assert.equal(MANUAL_DISPLAY_SECONDS, 10);
-  assert.equal(MANUAL_TURN_SECONDS, 15);
-  assert.equal(manualClockDisplaySeconds(deadlineAt, 0), 10);
-  assert.equal(manualClockDisplaySeconds(deadlineAt, 5_000), 5);
-  assert.equal(manualClockDisplaySeconds(deadlineAt, 10_000), 0);
-  assert.equal(manualClockDisplaySeconds(deadlineAt, deadlineAt), 0);
+test('turn clock rounds up and turns amber at 10 s, red at 5 s', () => {
+  assert.equal(secondsLeft(20_000, 0), 20);
+  assert.equal(secondsLeft(20_000, 19_001), 1);
+  assert.equal(secondsLeft(20_000, 20_000), 0);
+  assert.equal(secondsLeft(20_000, 25_000), 0);
+  assert.equal(clockUrgency(null), 'calm');
+  assert.equal(clockUrgency(11), 'calm');
+  assert.equal(clockUrgency(10), 'warn');
+  assert.equal(clockUrgency(6), 'warn');
+  assert.equal(clockUrgency(5), 'danger');
+  assert.equal(clockUrgency(0), 'danger');
 });
 
 test('new games default to No Steve while legacy saved games retain I’m Steve', () => {
@@ -645,6 +648,33 @@ test('presentationSnapshot includes standings, live round state and the clock', 
   assert.deepEqual(snap.standings.map((row) => [row.name, row.total, row.rank]), [['Ann', 1, 1], ['Bob', 0, 2]]);
   assert.deepEqual(snap.standings[1].members, ['B1', 'B2']);
   assert.deepEqual(snap.round.find((row) => row.name === 'Bob'), { name: 'Bob', points: 0, out: false, current: true });
-  assert.deepEqual(snap.clock, { deadlineAt: 5000, seconds: MANUAL_DISPLAY_SECONDS, manual: true });
+  assert.equal(snap.clock, null, "I'm Steve never shows a clock");
+  assert.equal(snap.upNextName, 'Ann');
+  game.mode = 'no-steve';
+  currentRound(game).turnSeconds = 20;
+  assert.deepEqual(presentationSnapshot(game).clock, { deadlineAt: 5000, seconds: 20 });
   assert.equal(presentationSnapshot(createGame()).roundNumber, 0);
+});
+
+test('upNextTurn previews the next player without changing the round', () => {
+  const game = createGame();
+  for (const [name, id] of [['Ann', 'a'], ['Bob', 'b'], ['Cat', 'c']]) addContestant(game, createContestant(name, [], id));
+  nextRound(game, ['x']);
+  const first = currentTurn(game).id;
+  const order = ['a', 'b', 'c'];
+  const after = (id) => order[(order.indexOf(id) + 1) % 3];
+  const before = JSON.stringify(game);
+  assert.equal(upNextTurn(game).id, after(first));
+  assert.equal(JSON.stringify(game), before, 'the real round is untouched');
+
+  // First pass: the player after next misses too, so the starter's correct guess makes them the runner.
+  resolveGuess(game, 0, first, 'artist', true);
+  assert.equal(upNextTurn(game).id, after(after(first)));
+  resolveGuess(game, 0, after(first), null, false);
+  assert.equal(currentTurn(game).id, after(after(first)));
+  assert.equal(upNextTurn(game).id, first, 'board runner comes back around');
+  resolveGuess(game, 0, after(after(first)), null, false);
+  assert.equal(currentTurn(game).id, first);
+  assert.equal(upNextTurn(game), null, 'nobody is left if the runner misses');
+  assert.equal(upNextTurn(createGame()), null);
 });

@@ -5,12 +5,18 @@ export const CATEGORY_LABELS = { artist: 'Artist', title: 'Song', year: 'Year' }
 export const DEFAULT_TARGET_SCORE = 15;
 export const FIRST_GUESS_SECONDS = 60;
 export const FOLLOWUP_GUESS_SECONDS = 20;
-export const MANUAL_TURN_SECONDS = 15;
-export const MANUAL_DISPLAY_SECONDS = 10;
 
-export function manualClockDisplaySeconds(deadlineAt, now = Date.now()) {
-  const elapsed = MANUAL_TURN_SECONDS * 1000 - (deadlineAt - now);
-  return Math.min(MANUAL_DISPLAY_SECONDS, Math.max(0, Math.ceil((MANUAL_DISPLAY_SECONDS * 1000 - elapsed) / 1000)));
+/** Seconds left on a turn clock, rounded up so the display reaches 0 exactly at the deadline. */
+export function secondsLeft(deadlineAt, now = Date.now()) {
+  return Math.max(0, Math.ceil((deadlineAt - now) / 1000));
+}
+
+/** 'calm' | 'warn' (10 s or less) | 'danger' (5 s or less): drives the clock colour on both screens. */
+export function clockUrgency(seconds) {
+  if (seconds == null) return 'calm';
+  if (seconds <= 5) return 'danger';
+  if (seconds <= 10) return 'warn';
+  return 'calm';
 }
 
 /**
@@ -262,8 +268,10 @@ export function presentationSnapshot(game, { answers = {}, phase = null, now = D
     roundNumber: game.rounds.length,
     phase: phase ?? round?.phase ?? 'idle',
     turnName: turn?.name ?? null,
-    clock: round?.turnDeadlineAt
-      ? { deadlineAt: round.turnDeadlineAt, seconds: game.mode === 'im-steve' ? MANUAL_DISPLAY_SECONDS : round.turnSeconds ?? null, manual: game.mode === 'im-steve' }
+    upNextName: upNextTurn(game)?.name ?? null,
+    // Only No Steve runs a turn clock; in I'm Steve the host paces the turns.
+    clock: game.mode === 'no-steve' && round?.turnDeadlineAt
+      ? { deadlineAt: round.turnDeadlineAt, seconds: round.turnSeconds ?? null }
       : null,
     answers: Object.fromEntries(CATEGORIES.map((category) => [
       category,
@@ -296,6 +304,19 @@ export function currentRound(game) {
 export function currentTurn(game) {
   const round = currentRound(game);
   return game.contestants.find((contestant) => contestant.id === round?.currentTurnId) ?? null;
+}
+
+/**
+ * Who plays after the current contestant if they miss or pass: the turn rules run on a copy
+ * of the round, so this always agrees with what really happens next. Null when nobody is left.
+ */
+export function upNextTurn(game) {
+  const round = currentRound(game);
+  const turn = currentTurn(game);
+  if (!round || !turn) return null;
+  const preview = { contestants: game.contestants, rounds: [structuredClone(round)] };
+  resolveManualTurn(preview, 0, turn.id, null);
+  return currentTurn(preview);
 }
 
 /** Awards an unsolved category to the contestant whose turn it is. */

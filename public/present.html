@@ -12,11 +12,12 @@
       <div class="present-top">
         <h1>🎵 Music Game</h1>
         <span id="present-meta" class="present-meta"></span>
+        <button id="present-fullscreen" type="button" class="secondary present-fullscreen" title="Full screen (F)">⛶ Full screen</button>
       </div>
 
       <p id="present-waiting" class="present-waiting">Waiting for the host screen… Start or resume a game in the main window.</p>
 
-      <section id="present-song" hidden>
+      <section id="present-song" class="present-song" hidden>
         <div class="present-card">
           <img id="present-cover" alt="Album art" hidden />
           <div class="present-answers">
@@ -26,10 +27,16 @@
             <div id="present-album" class="present-album" hidden></div>
           </div>
         </div>
-        <div class="present-turn" aria-live="polite">
-          <span id="present-turn"></span>
-          <output id="present-clock" class="present-clock" role="timer" hidden></output>
+      </section>
+
+      <section id="present-banner" class="present-banner idle" data-urgency="calm" aria-live="polite" hidden>
+        <div class="present-who">
+          <span id="present-now-label" class="present-now-label" hidden>Now</span>
+          <span id="present-turn" class="present-turn"></span>
+          <span id="present-next" class="present-next" hidden>Up next: <strong id="present-next-name"></strong></span>
         </div>
+        <output id="present-clock" class="present-clock" role="timer" hidden></output>
+        <div id="present-bar" class="present-bar" hidden><div id="present-bar-fill" class="present-bar-fill"></div></div>
       </section>
 
       <section id="present-board" class="present-board" hidden>

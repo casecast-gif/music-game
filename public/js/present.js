@@ -1,6 +1,6 @@
 // TV / audience view. Renders the snapshot the host screen publishes (see publishPresentation in
 // app.js). It never sees hidden answers: the host only sends answers that have been revealed.
-import { CATEGORIES, manualClockDisplaySeconds } from './game.js';
+import { CATEGORIES, clockUrgency, secondsLeft } from './game.js';
 import { PRESENT_CHANNEL, PRESENT_STORAGE_KEY } from './present-sync.js';
 
 const $ = (id) => document.getElementById(id);
@@ -22,21 +22,32 @@ function accept(next) {
   render();
 }
 
-function clockSeconds(clock, now = Date.now()) {
-  if (!clock?.deadlineAt) return null;
-  if (clock.manual) return manualClockDisplaySeconds(clock.deadlineAt, now);
-  return Math.max(0, Math.ceil((clock.deadlineAt - now) / 1000));
+function clockRunning(s) {
+  return Boolean(s?.clock?.deadlineAt) && !s.complete && s.phase === 'turn';
 }
 
-function turnText(s) {
+function turnActive(s) {
+  return Boolean(s.turnName) && !s.complete && ['turn', 'manual'].includes(s.phase);
+}
+
+function idleText(s) {
   if (s.phase === 'game-over') {
     const top = s.standings[0]?.total ?? 0;
     const winners = s.standings.filter((row) => row.total === top).map((row) => row.name);
     return `${winners.length > 1 ? 'Tie' : 'Winner'}: ${winners.join(' and ')}! 🏆`;
   }
   if (s.phase === 'reveal' || s.complete) return 'Round complete';
-  if (s.turnName) return `${s.turnName}’s turn`;
   return 'Listen up…';
+}
+
+function renderBanner(s) {
+  const active = turnActive(s);
+  $('present-banner').classList.toggle('idle', !active);
+  $('present-banner').classList.toggle('winner', s.phase === 'game-over');
+  $('present-now-label').hidden = !active;
+  $('present-turn').textContent = active ? s.turnName : idleText(s);
+  $('present-next').hidden = !active || !s.upNextName;
+  $('present-next-name').textContent = s.upNextName ?? '';
 }
 
 function renderAnswers(s) {
@@ -46,6 +57,9 @@ function renderAnswers(s) {
     const wasShown = previousAnswers[category] != null;
     el.textContent = value ?? '?';
     el.classList.toggle('hidden', value == null);
+    // Shrink long titles so three answers still fit the card at TV size.
+    el.classList.toggle('long', (value?.length ?? 0) > 22);
+    el.classList.toggle('very-long', (value?.length ?? 0) > 40);
     if (value != null && !wasShown) {
       el.classList.remove('just-revealed');
       void el.offsetWidth; // restart the animation
@@ -65,13 +79,15 @@ function renderAnswers(s) {
 function renderStandings(s) {
   const roundByName = new Map(s.round.map((row) => [row.name, row]));
   $('present-goal').textContent = `· to ${s.targetScore}`;
+  $('present-board').classList.toggle('many', s.standings.length > 7);
   $('present-standings').replaceChildren(...s.standings.map((row) => {
     const tr = document.createElement('tr');
     const live = roundByName.get(row.name);
     if (row.rank === 1 && row.total > 0) tr.classList.add('leader');
-    if (live?.current && !s.complete && s.phase !== 'game-over') tr.classList.add('current');
+    if (live?.current && turnActive(s)) tr.classList.add('current');
     if (live?.out) tr.classList.add('out');
     const rank = document.createElement('td');
+    rank.className = 'rank';
     rank.textContent = String(row.rank);
     const name = document.createElement('td');
     name.textContent = row.name;
@@ -82,7 +98,7 @@ function renderStandings(s) {
       name.append(members);
     }
     const thisSong = document.createElement('td');
-    thisSong.className = 'num muted';
+    thisSong.className = 'num gain';
     thisSong.textContent = live?.points ? `+${live.points}` : '';
     const total = document.createElement('td');
     total.className = 'num';
@@ -93,9 +109,18 @@ function renderStandings(s) {
 }
 
 function renderClock() {
-  const seconds = snapshot && !snapshot.complete && snapshot.phase !== 'reveal' ? clockSeconds(snapshot.clock) : null;
-  $('present-clock').hidden = seconds == null;
-  $('present-clock').textContent = seconds == null ? '' : String(seconds);
+  const now = Date.now();
+  const running = clockRunning(snapshot);
+  const left = running ? secondsLeft(snapshot.clock.deadlineAt, now) : null;
+  $('present-clock').hidden = !running;
+  $('present-clock').textContent = running ? String(left) : '';
+  $('present-banner').dataset.urgency = clockUrgency(left);
+  const total = snapshot?.clock?.seconds;
+  $('present-bar').hidden = !running || !total;
+  if (running && total) {
+    const fraction = Math.max(0, snapshot.clock.deadlineAt - now) / (total * 1000);
+    $('present-bar-fill').style.width = `${Math.min(100, fraction * 100)}%`;
+  }
 }
 
 function render() {
@@ -103,12 +128,14 @@ function render() {
   const playing = Boolean(s && s.roundNumber > 0 && s.phase !== 'idle');
   $('present-waiting').hidden = playing;
   $('present-song').hidden = !playing;
+  $('present-banner').hidden = !playing;
   $('present-board').hidden = !s || !s.standings.length;
+  document.body.classList.toggle('present-has-board', Boolean(s?.standings.length));
   if (!s) return;
   $('present-meta').textContent = playing ? `Song ${s.roundNumber} · ${s.mode === 'im-steve' ? 'I’m Steve' : 'No Steve'}` : '';
   if (playing) {
     renderAnswers(s);
-    $('present-turn').textContent = turnText(s);
+    renderBanner(s);
   } else {
     previousAnswers = {};
   }
@@ -131,6 +158,35 @@ window.addEventListener('storage', (event) => {
     }
   }
 });
+
+// ---------- Full screen + hide the mouse pointer on the TV ----------
+
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen?.();
+  else document.documentElement.requestFullscreen?.().catch(() => {});
+}
+
+function syncFullscreenButton() {
+  const button = $('present-fullscreen');
+  button.hidden = !document.documentElement.requestFullscreen || Boolean(document.fullscreenElement);
+}
+
+$('present-fullscreen').addEventListener('click', toggleFullscreen);
+document.addEventListener('dblclick', toggleFullscreen);
+document.addEventListener('keydown', (event) => {
+  if (event.key.toLowerCase() === 'f' && !event.ctrlKey && !event.metaKey && !event.altKey) toggleFullscreen();
+});
+document.addEventListener('fullscreenchange', syncFullscreenButton);
+syncFullscreenButton();
+
+let idleTimer = null;
+function wakePointer() {
+  document.body.classList.remove('pointer-idle');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => document.body.classList.add('pointer-idle'), 3000);
+}
+document.addEventListener('mousemove', wakePointer);
+wakePointer();
 
 accept(readStored());
 render();

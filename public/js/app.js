@@ -3,12 +3,13 @@ import {
   CATEGORIES,
   CATEGORY_LABELS,
   DEFAULT_TARGET_SCORE,
-  MANUAL_TURN_SECONDS,
   TIMING_LIMITS,
   normalizeTimings,
   updateTimings,
   guessTimeLimitSeconds,
-  manualClockDisplaySeconds,
+  clockUrgency,
+  secondsLeft,
+  upNextTurn,
   addContestant,
   createContestant,
   createGame,
@@ -270,6 +271,12 @@ function describeTimings() {
   return `No Steve: the first guess gets ${seconds(t.firstGuessSeconds)}; every later guess gets ${seconds(t.followupGuessSeconds)}. Correct players circle back until everyone misses or all categories are solved.`;
 }
 
+/** One-line summary shown on the folded timers section of the setup screen. */
+function summarizeTimings() {
+  const t = timings();
+  return `First guess ${t.firstGuessSeconds} s · later guesses ${t.followupGuessSeconds} s · reveal ${t.revealSeconds} s`;
+}
+
 /**
  * Updates one timer from either the setup screen or the in-game drawer. The value is
  * clamped to its limits, saved on the game and as the default for future games.
@@ -284,6 +291,7 @@ function applyTimingChange(key, rawValue) {
   renderTimingInputs('setup-timing');
   renderTimingInputs('game-timing');
   $('turn-duration-setting').textContent = describeTimings();
+  $('timings-summary').textContent = summarizeTimings();
   const clamped = Number(rawValue) !== updated[key];
   setStatus(`${TIMING_LABELS[key]} set to ${seconds(updated[key])}${clamped ? ` (allowed ${min}–${max})` : ''}. Applies from the next ${key === 'revealSeconds' ? 'song' : 'turn'}.`);
 }
@@ -317,9 +325,9 @@ function renderSetup() {
   $('mode-im-steve').setAttribute('aria-pressed', String(!noSteve));
   $('mode-no-steve').classList.toggle('primary', noSteve);
   $('mode-im-steve').classList.toggle('primary', !noSteve);
-  $('turn-duration-setting').hidden = !noSteve;
+  $('setup-timings-details').hidden = !noSteve;
   $('turn-duration-setting').textContent = describeTimings();
-  $('setup-timings').hidden = !noSteve;
+  $('timings-summary').textContent = summarizeTimings();
   renderTimingInputs('setup-timing');
   $('mode-description').textContent = noSteve
     ? 'No host needed: the screen runs timed turns, checks submitted guesses, keeps wrong answers hidden, and advances automatically.'
@@ -388,7 +396,26 @@ function renderSetup() {
     }),
   );
 
-  const ready = (mock || loggedIn) && !state.loadingPlaylist && state.tracks.size > 0 && state.game.contestants.length > 0;
+  $('contestant-empty').hidden = state.game.contestants.length > 0;
+  const musicReady = (mock || loggedIn) && !state.loadingPlaylist && state.tracks.size > 0;
+  $('open-music-settings').textContent = musicReady ? 'Change…' : 'Set up Spotify & playlist';
+  $('open-music-settings').classList.toggle('primary', !musicReady);
+  $('open-music-settings').classList.toggle('secondary', musicReady);
+
+  // Say what is missing instead of only greying out Start.
+  const missing = [];
+  if (!state.game.contestants.length) missing.push('Add at least one player or team (step 2)');
+  if (!mock && !loggedIn) missing.push('Log in with Spotify (step 3)');
+  if (state.loadingPlaylist) missing.push('Wait for the playlist to finish loading');
+  else if (!state.tracks.size) missing.push('Load a playlist (step 3)');
+  $('start-checklist').hidden = !missing.length;
+  $('start-checklist').replaceChildren(...missing.map((text) => {
+    const li = document.createElement('li');
+    li.textContent = text;
+    return li;
+  }));
+
+  const ready = musicReady && state.game.contestants.length > 0;
   $('start').disabled = !ready;
   const resumable = ready && state.game.rounds.length > 0 && state.game.playlistId === parsePlaylistId(state.playlistInput);
   $('resume').hidden = !resumable;
@@ -965,15 +992,6 @@ function renderGuessControls() {
     && Boolean(activeContestant)
     && openCategories.some((category) => category !== 'year' || yearReady);
   $('auto-turn').hidden = state.game.mode !== 'no-steve' || state.roundPhase !== 'turn';
-  const manualClockActive = state.game.mode === 'im-steve' && Boolean(round?.turnDeadlineAt);
-  $('manual-clock-controls').hidden = state.game.mode !== 'im-steve';
-  $('start-manual-clock').disabled = !activeContestant
-    || state.roundPhase !== 'manual'
-    || manualClockActive;
-  $('manual-clock-display').hidden = !manualClockActive;
-  if (manualClockActive) {
-    $('manual-clock-display').textContent = String(manualClockDisplaySeconds(round.turnDeadlineAt));
-  }
   $('guess-form').hidden = state.roundPhase !== 'turn' || !activeContestant;
   categorySelect.disabled = !canAnswer;
   $('guess-text').disabled = !canAnswer;
@@ -985,8 +1003,48 @@ function renderGuessControls() {
   $('next').disabled = state.roundPhase === 'game-over';
   $('replay').disabled = state.game.mode === 'no-steve' && state.roundPhase === 'turn';
   $('next').textContent = state.game.mode === 'no-steve' ? 'Skip song' : '⏭ Next song';
-  $('turn-progress').max = turnLengthSeconds(currentRound(state.game));
-  $('turn-countdown').textContent = '';
+  renderTurnBanner();
+}
+
+/** Text for the NOW line when nobody is up (between turns, round over, game over). */
+function idleTurnText() {
+  if (state.roundPhase === 'game-over') {
+    const rows = standings(state.game);
+    const winners = rows.filter((row) => row.total === rows[0]?.total).map((row) => row.contestant.name);
+    return `${winners.length > 1 ? 'Tie' : 'Winner'}: ${winners.join(' and ')} 🏆`;
+  }
+  if (state.roundPhase === 'idle') return 'Next song coming up…';
+  return 'Round complete';
+}
+
+/**
+ * The sticky NOW / up next banner at the top of the game screen. The countdown only exists in
+ * No Steve; in I'm Steve the host paces the turns, so the banner shows just the names.
+ */
+function renderTurnBanner() {
+  const round = currentRound(state.game);
+  const turn = currentTurn(state.game);
+  const solved = round && scoredCategories(round, state.game.contestants).length === CATEGORIES.length;
+  const active = Boolean(turn) && !solved && ['turn', 'manual'].includes(state.roundPhase);
+  const next = active ? upNextTurn(state.game) : null;
+  $('turn-banner').classList.toggle('idle', !active);
+  $('turn-now-label').hidden = !active;
+  $('turn-now-name').textContent = active ? turn.name : idleTurnText();
+  $('turn-next').hidden = !next;
+  $('turn-next-name').textContent = next?.name ?? '';
+  renderTurnBannerClock();
+}
+
+function renderTurnBannerClock(now = Date.now()) {
+  const round = currentRound(state.game);
+  const running = state.game.mode === 'no-steve' && state.roundPhase === 'turn' && Boolean(round?.turnDeadlineAt);
+  const left = running ? secondsLeft(round.turnDeadlineAt, now) : null;
+  const total = running ? turnLengthSeconds(round) : 0;
+  $('turn-clock').hidden = !running;
+  $('turn-clock').textContent = running ? String(left) : '';
+  $('turn-banner').dataset.urgency = clockUrgency(left);
+  $('turn-bar').hidden = !running;
+  $('turn-bar-fill').style.width = running && total ? `${Math.min(100, (Math.max(0, round.turnDeadlineAt - now) / (total * 1000)) * 100)}%` : '0%';
 }
 
 // The running turn keeps the length it started with, even if the timers change mid-turn.
@@ -1017,24 +1075,10 @@ function clearAutomationTimers() {
 
 function updateRoundClock() {
   const now = Date.now();
-  if (state.roundPhase === 'manual') {
-    const round = currentRound(state.game);
-    if (!round?.turnDeadlineAt) return;
-    $('manual-clock-display').textContent = String(manualClockDisplaySeconds(round.turnDeadlineAt, now));
-    if (round.turnDeadlineAt <= now) {
-      stopRoundClock();
-      expireManualTurn();
-    }
-    return;
-  }
-
   const round = currentRound(state.game);
   if (state.roundPhase !== 'turn' || !round?.turnDeadlineAt) return;
-  const remaining = Math.max(0, round.turnDeadlineAt - now);
-  $('turn-progress').max = turnLengthSeconds(round);
-  $('turn-progress').value = Math.ceil(remaining / 1000);
-  $('turn-countdown').textContent = `${Math.ceil(remaining / 1000)}s`;
-  if (remaining === 0) {
+  renderTurnBannerClock(now);
+  if (round.turnDeadlineAt <= now) {
     stopRoundClock();
     expireTurn();
   }
@@ -1044,21 +1088,6 @@ function startRoundClock() {
   stopRoundClock();
   updateRoundClock();
   state.turnTimerInterval = setInterval(updateRoundClock, 250);
-}
-
-function startManualClock({ resume = false } = {}) {
-  const round = currentRound(state.game);
-  if (state.game.mode !== 'im-steve' || !round || !currentTurn(state.game)) return;
-  state.roundPhase = 'manual';
-  round.phase = 'manual';
-  if (resume && round.turnDeadlineAt && round.turnDeadlineAt <= Date.now()) {
-    expireManualTurn();
-    return;
-  }
-  if (!resume || !round.turnDeadlineAt) round.turnDeadlineAt = Date.now() + MANUAL_TURN_SECONDS * 1000;
-  saveGame();
-  renderGame();
-  startRoundClock();
 }
 
 function startTurnClock({ resume = false } = {}) {
@@ -1175,32 +1204,18 @@ function finishManualRound() {
       : 'Everyone is out. Remaining answers are revealed; choose Next song when ready.');
 }
 
-function completeManualTurn(contestantId, category = null, { timedOut = false } = {}) {
+function completeManualTurn(contestantId, category = null) {
   const roundIndex = state.game.rounds.length - 1;
   const round = currentRound(state.game);
   const contestant = state.game.contestants.find((c) => c.id === contestantId);
   if (!round || !contestant) return;
-  if (!timedOut && round.turnDeadlineAt && round.turnDeadlineAt <= Date.now()) {
-    expireManualTurn();
-    return;
-  }
-  stopRoundClock();
   resolveManualTurn(state.game, roundIndex, contestantId, category);
   if (category !== null) revealAnswer(state.game, category);
   saveGame();
   renderAnswer();
   renderHistory();
   renderScores();
-  if (!currentTurn(state.game)) {
-    finishManualRound();
-  } else if (timedOut) {
-    setStatus(`${contestant.name} ran out of time and is out for this song.`);
-  }
-}
-
-function expireManualTurn() {
-  const contestant = currentTurn(state.game);
-  if (contestant) completeManualTurn(contestant.id, null, { timedOut: true });
+  if (!currentTurn(state.game)) finishManualRound();
 }
 
 function advanceAfterTurn() {
@@ -1497,8 +1512,6 @@ async function enterGame({ fresh }) {
       state.roundPhase = 'manual';
       if (!currentTurn(state.game)) {
         finishManualRound();
-      } else if (round.turnDeadlineAt) {
-        startManualClock({ resume: true });
       } else {
         renderGame();
         setStatus('Game resumed — press Play to continue the current song.');
@@ -1691,7 +1704,11 @@ on('playback-use-browser', 'click', async () => {
 on('playback-dismiss', 'click', () => hidePlaybackHelp());
 on('mode-no-steve', 'click', () => selectMode('no-steve'));
 on('mode-im-steve', 'click', () => selectMode('im-steve'));
-on('start-manual-clock', 'click', () => startManualClock());
+on('open-music-settings', 'click', () => {
+  const settings = $('setup-settings');
+  settings.open = true;
+  settings.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
 on('open-spotify-player', 'click', () => openEmbeddedPlayer());
 on('enable-browser-player', 'click', async () => {
   if (spotify().deviceId) {
